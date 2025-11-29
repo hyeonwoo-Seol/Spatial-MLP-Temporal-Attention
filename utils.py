@@ -3,19 +3,19 @@ import torch.nn as nn
 import os
 import torch.nn.functional as F
 
+
+
+# >> 모델의 logits과 실제 레이블을 기반으로 정확도를 계산한다.
 def calculate_accuracy(outputs, labels):
-    """
-    모델의 출력(logits)과 실제 레이블을 기반으로 정확도를 계산
-    """
     _, predicted = torch.max(outputs.data, 1)
     total = labels.size(0)
     correct = (predicted == labels).sum().item()
     return correct / total
 
+
+
+# >> 체크포인트를 저장한다.
 def save_checkpoint(state, directory, filename="checkpoint.pth.tar"):
-    """
-    체크포인트 저장 (임시 파일 생성 후 rename하여 안전성 확보)
-    """
     if not os.path.exists(directory):
         os.makedirs(directory)
 
@@ -30,10 +30,10 @@ def save_checkpoint(state, directory, filename="checkpoint.pth.tar"):
         if os.path.exists(filepath_tmp):
             os.remove(filepath_tmp)
 
+
+
+# >> 저장된 체크포인트를 복원한다.
 def load_checkpoint(checkpoint_path, model, optimizer=None, scheduler=None, device='cpu'):
-    """
-    저장된 체크포인트 복원
-    """
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"Checkpoint not found at '{checkpoint_path}'")
 
@@ -50,14 +50,9 @@ def load_checkpoint(checkpoint_path, model, optimizer=None, scheduler=None, devi
     print(f"Model checkpoint loaded from '{checkpoint_path}'")
     return checkpoint
 
+
+# >> 2개의 View에서 나온 특징 벡터 사이의 상관관계 행렬이 단위 행렬에 가까워지도록 유도한다.
 class FeatureConsistencyLoss(nn.Module):
-    """
-    [Feature Consistency Loss]
-    두 개의 뷰(View1, View2)에서 나온 특징 벡터 간의 상관관계 행렬(Correlation Matrix)이
-    단위 행렬(Identity Matrix)에 가까워지도록 유도하여,
-    1. 동일한 샘플의 특징은 유사하게 (Diagonal -> 1)
-    2. 서로 다른 차원의 특징은 독립적이게 (Off-diagonal -> 0) 만듦.
-    """
     def __init__(self, lambd=0.0051):
         super().__init__()
         self.lambd = lambd
@@ -82,6 +77,8 @@ class FeatureConsistencyLoss(nn.Module):
         loss = on_diag + self.lambd * off_diag
         return loss
 
+
+    
 def off_diagonal(x):
     # return a flattened view of the off-diagonal elements of a square matrix
     n, m = x.shape

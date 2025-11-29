@@ -345,6 +345,5 @@ class ST_GRL_Model(nn.Module):
         domain_feat = self.grl(pooled_features)
         domain_logits = self.domain_head(domain_feat)
         
-        # Feature Consistency를 위해 Pooling된 특징(N, D)을 반환해야 함
-        # 이전에는 frame_features(N, T, D)를 반환하여 에러 발생 가능성 있었음
+        # Feature Consistency를 위해 Pooling된 특징(N, D)을 반환
         return action_logits, domain_logits, pooled_features

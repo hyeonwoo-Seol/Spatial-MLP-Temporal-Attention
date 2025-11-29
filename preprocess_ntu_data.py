@@ -119,8 +119,9 @@ def _read_skeleton_file(filepath):
         
     return final_coords
 
+
+# >> 12차원 벡터 특징 계산 함수
 def _calculate_features(coords):
-    """12차원 벡터 특징 계산 함수"""
     T = coords.shape[0]
     if T == 0:
         return np.zeros((0, NUM_JOINTS, config.NUM_COORDS))
@@ -192,8 +193,9 @@ def _calculate_features(coords):
     
     return np.concatenate((person1, person2), axis=1)
 
+
+# >> 통계 계산 함수
 def process_file_for_stats(filename):
-    """[수정됨] 통계 계산용 워커 함수: X-Sub, X-View 여부를 함께 반환"""
     if not filename.endswith('.skeleton'): return None
     
     # Protocol 판별
@@ -224,8 +226,9 @@ def process_file_for_stats(filename):
     # (카운트, 합, 제곱합, X-Sub여부, X-View여부) 반환
     return (valid_data.shape[0], valid_data.sum(axis=0), np.sum(valid_data**2, axis=0), is_xsub_train, is_xview_train)
 
+
+# >> 통계 계산 및 분리 저장
 def calculate_and_save_stats():
-    """[수정됨] 통계(Mean, Std) 계산 및 분리 저장 (X-Sub / X-View)"""
     print("--- Calculating Stats for 12D Features (Separate for X-Sub / X-View) ---")
     filenames = os.listdir(SOURCE_DATA_PATH)
     
@@ -270,8 +273,9 @@ def calculate_and_save_stats():
     np.savez(STATS_FILE_XVIEW, mean=mean_view, std=std_view)
     print(f"X-View Stats saved to {STATS_FILE_XVIEW}")
 
+
+# >> 최종 전처리 및 저장
 def process_and_save_file(filename):
-    """최종 전처리 및 저장"""
     if not filename.endswith('.skeleton'): return
     
     path = os.path.join(SOURCE_DATA_PATH, filename)
@@ -298,6 +302,8 @@ def process_and_save_file(filename):
         'label': label
     }, os.path.join(TARGET_DATA_PATH, filename.replace('.skeleton', '.pt')))
 
+
+    
 def main():
     if not os.path.exists(TARGET_DATA_PATH):
         os.makedirs(TARGET_DATA_PATH)
@@ -313,5 +319,7 @@ def main():
     with Pool(num_cores) as pool:
         list(tqdm(pool.imap_unordered(process_and_save_file, filenames), total=len(filenames)))
 
+
+        
 if __name__ == '__main__':
     main()

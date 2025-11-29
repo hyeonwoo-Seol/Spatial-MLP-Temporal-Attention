@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.cuda.amp import GradScaler, autocast
-from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, CosineAnnealingWarmRestarts, SequentialLR
+from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 from tqdm import tqdm
 import os
 import random
@@ -17,6 +17,8 @@ from ntu_data_loader import NTURGBDDataset
 from model import ST_GRL_Model
 from utils import calculate_accuracy, save_checkpoint, load_checkpoint, FeatureConsistencyLoss
 
+
+
 def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
@@ -27,18 +29,21 @@ def set_seed(seed):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-def get_scheduler(optimizer, scheduler_name, total_epochs, warmup_epochs):
-    print(f"Using '{scheduler_name}' scheduler.")
+
+    
+def get_scheduler(optimizer, total_epochs, warmup_epochs):
+    print(f"Using 'Warmup + Cosine Annealing' scheduler.")
+    
+    # 1. Warmup Scheduler
     warmup_scheduler = LinearLR(optimizer, start_factor=0.01, end_factor=1.0, total_iters=warmup_epochs)
     
-    if scheduler_name == 'cosine_decay':
-        main_scheduler = CosineAnnealingLR(optimizer, T_max=total_epochs - warmup_epochs, eta_min=config.ETA_MIN)
-    elif scheduler_name == 'cosine_restarts':
-        main_scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=config.T_0, T_mult=config.T_MULT, eta_min=config.ETA_MIN)
-    else:
-        raise ValueError(f"Unknown scheduler: {scheduler_name}")
+    # 2. Main Scheduler (Cosine Decay)
+    main_scheduler = CosineAnnealingLR(optimizer, T_max=total_epochs - warmup_epochs, eta_min=config.ETA_MIN)
 
+    # 3. Sequential (Warmup -> Main)
     return SequentialLR(optimizer, schedulers=[warmup_scheduler, main_scheduler], milestones=[warmup_epochs])
+
+
 
 def train_one_epoch(model, source_loader, target_loader, criterion_cls, criterion_domain, criterion_fc, optimizer, device, scaler, epoch, args, global_step, total_steps):
     model.train()
@@ -55,7 +60,7 @@ def train_one_epoch(model, source_loader, target_loader, criterion_cls, criterio
     
     for (src_data), (tgt_data) in pbar:
         # --- Alpha Scheduling (GRL) ---
-        # 논문 수식: alpha = 2 / (1 + exp(-10 * p)) - 1
+        # 수식: alpha = 2 / (1 + exp(-10 * p)) - 1
         # p: 학습 진행률 (0 ~ 1)
         p = float(global_step) / total_steps
         alpha = 2.0 / (1.0 + np.exp(-10 * p)) - 1
@@ -83,7 +88,6 @@ def train_one_epoch(model, source_loader, target_loader, criterion_cls, criterio
             # ====================================================
             # (A) Source Stream Forward
             # ====================================================
-            # 계산된 동적 alpha 값 적용
             src_logits1, src_dom_logits1, src_feat1 = model(src_view1, alpha=alpha)
             src_logits2, src_dom_logits2, src_feat2 = model(src_view2, alpha=alpha)
             
@@ -99,7 +103,6 @@ def train_one_epoch(model, source_loader, target_loader, criterion_cls, criterio
             # ====================================================
             # (B) Target Stream Forward
             # ====================================================
-            # 계산된 동적 alpha 값 적용
             tgt_logits1, tgt_dom_logits1, tgt_feat1 = model(tgt_view1, alpha=alpha)
             
             # 4. Domain Loss (Target)
@@ -133,7 +136,7 @@ def train_one_epoch(model, source_loader, target_loader, criterion_cls, criterio
         # Global Step 증가
         global_step += 1
         
-        # Logging (현재 Alpha 값도 함께 표시)
+        # Logging
         pbar.set_postfix({
             'L_All': f"{loss.item():.3f}", 
             'Acc': f"{correct_action/total_samples:.3f}",
@@ -141,6 +144,8 @@ def train_one_epoch(model, source_loader, target_loader, criterion_cls, criterio
         })
         
     return running_loss / total_samples, correct_action / total_samples, global_step
+
+
 
 def validate_one_epoch(model, loader, criterion_cls, device):
     model.eval()
@@ -154,7 +159,7 @@ def validate_one_epoch(model, loader, criterion_cls, device):
             action_labels = action_labels.to(device)
             
             with autocast():
-                # Validation에서는 Alpha=0 (GRL 영향 없음)
+                # Validation에서는 Alpha=0
                 act_logits, _, _ = model(view1, alpha=0.0) 
                 loss = criterion_cls(act_logits, action_labels)
                 
@@ -165,13 +170,14 @@ def validate_one_epoch(model, loader, criterion_cls, device):
             
     return running_loss / total_samples, correct_action / total_samples
 
+
+
 def run_training(args):
     # 설정 업데이트
     set_seed(config.SEED)
     config.LEARNING_RATE = args.lr
     config.DROPOUT = args.dropout
-    # args.alpha는 이제 초기값이 아닌 스케줄링 여부 플래그 등으로 사용할 수도 있지만,
-    # 여기서는 논문 구현을 위해 강제로 스케줄링 로직을 사용하므로 무시되거나 Max 값으로 간주됩니다.
+    # Alpha는 동적 스케줄링으로 사용됨
     
     config.PROB = args.prob
     config.ADAMW_WEIGHT_DECAY = args.weight_decay
@@ -220,7 +226,10 @@ def run_training(args):
     
     # 3. Optim & Loss
     optimizer = optim.AdamW(model.parameters(), lr=config.LEARNING_RATE, weight_decay=config.ADAMW_WEIGHT_DECAY)
-    scheduler = get_scheduler(optimizer, args.scheduler, config.EPOCHS, config.WARMUP_EPOCHS)
+    
+    # 스케줄러 선택 로직 제거하고 표준 Warmup+CosineDecay 사용
+    scheduler = get_scheduler(optimizer, config.EPOCHS, config.WARMUP_EPOCHS)
+    
     scaler = GradScaler()
     
     criterion_cls = nn.CrossEntropyLoss(label_smoothing=config.LABEL_SMOOTHING)
@@ -232,8 +241,6 @@ def run_training(args):
     trial_save_dir = os.path.join(config.SAVE_DIR, args.study_name, f"trial_{args.trial_number}")
     os.makedirs(trial_save_dir, exist_ok=True)
     
-    # Alpha 스케줄링을 위한 전체 Step 계산
-    # zip으로 묶이므로 더 짧은 로더의 길이가 한 에폭당 Step 수
     steps_per_epoch = min(len(source_loader), len(target_loader))
     total_steps = config.EPOCHS * steps_per_epoch
     global_step = 0
@@ -242,7 +249,6 @@ def run_training(args):
     
     for epoch in range(config.EPOCHS):
         
-        # global_step을 인자로 넘기고, 업데이트된 값을 반환받음
         train_loss, train_acc, global_step = train_one_epoch(
             model, source_loader, target_loader, 
             criterion_cls, criterion_domain, criterion_fc, 
@@ -268,9 +274,12 @@ def run_training(args):
     print(f"Training Finished. Best Val Acc: {best_acc:.4f}")
     return best_acc
 
+
+
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--scheduler', type=str, default='cosine_decay', choices=['cosine_decay', 'cosine_restarts'])
     parser.add_argument('--protocol', type=str, default='xsub', choices=['xsub', 'xview'])
     parser.add_argument('--study-name', type=str, default='default_study')
     parser.add_argument('--trial-number', type=int, default=0)
@@ -278,7 +287,7 @@ def main():
     # Hyperparameters
     parser.add_argument('--lr', type=float, default=config.LEARNING_RATE)
     parser.add_argument('--dropout', type=float, default=config.DROPOUT)
-    parser.add_argument('--alpha', type=float, default=config.ADVERSARIAL_ALPHA) # 스케줄링이 적용되므로 이 값은 무시되거나 초기값으로 간주될 수 있음
+    parser.add_argument('--alpha', type=float, default=config.ADVERSARIAL_ALPHA)
     parser.add_argument('--prob', type=float, default=config.PROB)
     parser.add_argument('--weight-decay', type=float, default=config.ADAMW_WEIGHT_DECAY)
     parser.add_argument('--smoothing', type=float, default=config.LABEL_SMOOTHING)

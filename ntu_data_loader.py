@@ -12,11 +12,6 @@ TRAINING_CAMERAS = [2, 3]
 
 class NTURGBDDataset(Dataset):
     def __init__(self, data_path, split='train', max_frames=300, protocol='xsub'):
-        """
-        Args:
-            split (str): 'train' (Source Labeled), 'val' (Target Labeled for Eval), 
-                         'target_train' (Target Unlabeled for Adaptation)
-        """
         self.data_path = data_path
         self.split = split
         self.max_frames = max_frames
@@ -46,8 +41,8 @@ class NTURGBDDataset(Dataset):
             print(f"[{split.upper()}] Normalization stats loaded from {stats_filename} (Protocol: {protocol}).")
         else:
             print(f"Warning: Stats not found at {stats_path}. Using identity.")
-            self.mean = torch.zeros(12) 
-            self.std = torch.ones(12)
+            self.mean = torch.zeros(config.NUM_COORDS) 
+            self.std = torch.ones(config.NUM_COORDS)
 
     def _load_data_path(self):
         if not os.path.exists(self.data_path):
@@ -93,10 +88,9 @@ class NTURGBDDataset(Dataset):
     def __len__(self):
         return len(self.samples)
 
+
+    # >> Feature Consistency를 위한 랜덤 시간 크롭(View 2)
     def _random_temporal_crop(self, feature, valid_length):
-        """
-        Feature Consistency를 위한 랜덤 시간 크롭 (View 2 생성용)
-        """
         T, V, C = feature.shape
         
         if valid_length < 10: 
