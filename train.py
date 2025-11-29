@@ -40,25 +40,26 @@ def get_scheduler(optimizer, scheduler_name, total_epochs, warmup_epochs):
 
     return SequentialLR(optimizer, schedulers=[warmup_scheduler, main_scheduler], milestones=[warmup_epochs])
 
-def train_one_epoch(model, source_loader, target_loader, criterion_cls, criterion_domain, criterion_fc, optimizer, device, scaler, epoch, args):
+def train_one_epoch(model, source_loader, target_loader, criterion_cls, criterion_domain, criterion_fc, optimizer, device, scaler, epoch, args, global_step, total_steps):
     model.train()
     
     running_loss = 0.0
     correct_action = 0
     total_samples = 0
     
-    # 두 로더 중 길이가 짧은 쪽에 맞추거나, 긴 쪽에 맞추기 위해 zip 사용
-    # 일반적으로 Target 데이터가 적을 수 있으므로 itertools.cycle을 쓰기도 하지만, 
-    # 여기서는 간단히 zip을 사용하여 미니배치 쌍을 만듭니다.
-    # Source와 Target 배치가 1:1로 매핑되어 들어갑니다.
-    
     desc = f"[Train Ep {epoch+1}]"
-    # zip의 길이는 더 짧은 로더 기준이 되므로, 긴 로더의 데이터 일부는 이 에폭에서 안 쓰일 수 있음.
-    # 하지만 매 에폭마다 shuffle=True이므로 전체적으로는 골고루 학습됨.
+    
+    # zip을 사용하여 배치 쌍 생성 (길이는 짧은 쪽 기준)
     min_len = min(len(source_loader), len(target_loader))
     pbar = tqdm(zip(source_loader, target_loader), total=min_len, desc=desc, leave=False, colour='green')
     
     for (src_data), (tgt_data) in pbar:
+        # --- Alpha Scheduling (GRL) ---
+        # 논문 수식: alpha = 2 / (1 + exp(-10 * p)) - 1
+        # p: 학습 진행률 (0 ~ 1)
+        p = float(global_step) / total_steps
+        alpha = 2.0 / (1.0 + np.exp(-10 * p)) - 1
+        
         # --- 1. Source Data Unpacking ---
         src_view1, src_view2, src_labels, _, _ = src_data
         src_view1 = src_view1.to(device)
@@ -66,15 +67,13 @@ def train_one_epoch(model, source_loader, target_loader, criterion_cls, criterio
         src_labels = src_labels.to(device)
         
         # --- 2. Target Data Unpacking ---
-        tgt_view1, tgt_view2, _, _, _ = tgt_data # Target Label은 학습에 사용하지 않음 (Unsupervised)
+        tgt_view1, tgt_view2, _, _, _ = tgt_data 
         tgt_view1 = tgt_view1.to(device)
-        # Target Consistency를 쓰고 싶다면 tgt_view2도 사용 가능, 여기선 GRL 기본에 집중
         
         batch_size_src = src_view1.size(0)
         batch_size_tgt = tgt_view1.size(0)
         
         # --- 3. Domain Labels ---
-        # Source = 0, Target = 1
         domain_label_src = torch.zeros(batch_size_src, 1).to(device)
         domain_label_tgt = torch.ones(batch_size_tgt, 1).to(device)
         
@@ -84,40 +83,31 @@ def train_one_epoch(model, source_loader, target_loader, criterion_cls, criterio
             # ====================================================
             # (A) Source Stream Forward
             # ====================================================
-            # Action Classifier & Domain Discriminator for Source
-            # alpha는 Gradient Reversal Layer의 강도 (스케줄링 될 수 있음)
-            src_logits1, src_dom_logits1, src_feat1 = model(src_view1, alpha=args.alpha)
-            src_logits2, src_dom_logits2, src_feat2 = model(src_view2, alpha=args.alpha)
+            # 계산된 동적 alpha 값 적용
+            src_logits1, src_dom_logits1, src_feat1 = model(src_view1, alpha=alpha)
+            src_logits2, src_dom_logits2, src_feat2 = model(src_view2, alpha=alpha)
             
-            # 1. Action Classification Loss (Source Only)
+            # 1. Action Classification Loss
             loss_cls = (criterion_cls(src_logits1, src_labels) + criterion_cls(src_logits2, src_labels)) * 0.5
             
-            # 2. Feature Consistency Loss (Source)
+            # 2. Feature Consistency Loss
             loss_fc_src = criterion_fc(src_feat1, src_feat2)
             
-            # 3. Domain Loss (Source -> 0)
+            # 3. Domain Loss (Source)
             loss_dom_src = criterion_domain(src_dom_logits1, domain_label_src)
 
             # ====================================================
             # (B) Target Stream Forward
             # ====================================================
-            # Target 데이터는 Action Label이 없으므로 Classification Loss 계산 안 함
-            # 오직 Domain Discriminator와 (선택적으로) Consistency Loss만 계산
-            tgt_logits1, tgt_dom_logits1, tgt_feat1 = model(tgt_view1, alpha=args.alpha)
+            # 계산된 동적 alpha 값 적용
+            tgt_logits1, tgt_dom_logits1, tgt_feat1 = model(tgt_view1, alpha=alpha)
             
-            # 4. Domain Loss (Target -> 1)
+            # 4. Domain Loss (Target)
             loss_dom_tgt = criterion_domain(tgt_dom_logits1, domain_label_tgt)
-            
-            # (Optional) Target Feature Consistency
-            # 만약 Target에 대해서도 Temporal Robustness를 주고 싶다면 계산 (Unsupervised Augmentation)
-            # tgt_logits2, _, tgt_feat2 = model(tgt_view2.to(device), alpha=args.alpha)
-            # loss_fc_tgt = criterion_fc(tgt_feat1, tgt_feat2)
-            # 여기서는 논문(GRL) 구현의 핵심인 Domain Loss에 집중하기 위해 생략하거나 가중치를 낮게 줄 수 있음
             
             # ====================================================
             # (C) Total Loss
             # ====================================================
-            # Total Domain Loss
             loss_dom_total = (loss_dom_src + loss_dom_tgt) * 0.5
             
             # 최종 Loss 합산
@@ -136,19 +126,21 @@ def train_one_epoch(model, source_loader, target_loader, criterion_cls, criterio
         running_loss += loss.item() * batch_size_src
         total_samples += batch_size_src
         
-        # Acc 계산 (Source View1 기준)
+        # Acc 계산
         _, predicted = torch.max(src_logits1, 1)
         correct_action += (predicted == src_labels).sum().item()
         
-        # Logging
+        # Global Step 증가
+        global_step += 1
+        
+        # Logging (현재 Alpha 값도 함께 표시)
         pbar.set_postfix({
             'L_All': f"{loss.item():.3f}", 
-            'L_Cls': f"{loss_cls.item():.3f}",
-            'L_Dom': f"{loss_dom_total.item():.3f}",
-            'Acc': f"{correct_action/total_samples:.3f}"
+            'Acc': f"{correct_action/total_samples:.3f}",
+            'Alpha': f"{alpha:.3f}"
         })
         
-    return running_loss / total_samples, correct_action / total_samples
+    return running_loss / total_samples, correct_action / total_samples, global_step
 
 def validate_one_epoch(model, loader, criterion_cls, device):
     model.eval()
@@ -178,7 +170,9 @@ def run_training(args):
     set_seed(config.SEED)
     config.LEARNING_RATE = args.lr
     config.DROPOUT = args.dropout
-    config.ADVERSARIAL_ALPHA = args.alpha
+    # args.alpha는 이제 초기값이 아닌 스케줄링 여부 플래그 등으로 사용할 수도 있지만,
+    # 여기서는 논문 구현을 위해 강제로 스케줄링 로직을 사용하므로 무시되거나 Max 값으로 간주됩니다.
+    
     config.PROB = args.prob
     config.ADAMW_WEIGHT_DECAY = args.weight_decay
     config.LABEL_SMOOTHING = args.smoothing
@@ -187,26 +181,23 @@ def run_training(args):
     print(f"\n[Info] Device: {device}, Protocol: {args.protocol}")
     
     # ----------------------------------------------------------------------
-    # 1. Dataset & Loader Setup (Source & Target)
+    # 1. Dataset & Loader Setup
     # ----------------------------------------------------------------------
     g = torch.Generator()
     g.manual_seed(config.SEED)
 
-    # A. Source Loader (Labeled, Train Split)
     source_dataset = NTURGBDDataset(config.DATASET_PATH, split='train', max_frames=config.MAX_FRAMES, protocol=args.protocol)
     source_loader = torch.utils.data.DataLoader(
-        source_dataset, batch_size=config.BATCH_SIZE // 2, # 배치 사이즈를 반으로 나누어 Source/Target 합쳐서 원래 배치 크기 유지 권장
+        source_dataset, batch_size=config.BATCH_SIZE // 2, 
         shuffle=True, num_workers=config.NUM_WORKERS, pin_memory=config.PIN_MEMORY, generator=g, drop_last=True
     )
     
-    # B. Target Loader (Unlabeled, Target Train Split) -> GRL 학습용
     target_dataset = NTURGBDDataset(config.DATASET_PATH, split='target_train', max_frames=config.MAX_FRAMES, protocol=args.protocol)
     target_loader = torch.utils.data.DataLoader(
         target_dataset, batch_size=config.BATCH_SIZE // 2, 
         shuffle=True, num_workers=config.NUM_WORKERS, pin_memory=config.PIN_MEMORY, generator=g, drop_last=True
     )
 
-    # C. Validation Loader (Labeled Target, Val Split) -> 평가용
     val_dataset = NTURGBDDataset(config.DATASET_PATH, split='val', max_frames=config.MAX_FRAMES, protocol=args.protocol)
     val_loader = torch.utils.data.DataLoader(
         val_dataset, batch_size=config.BATCH_SIZE, 
@@ -236,19 +227,27 @@ def run_training(args):
     criterion_domain = nn.BCELoss() 
     criterion_fc = FeatureConsistencyLoss(lambd=0.005) 
     
-    # 4. Training Loop
+    # 4. Training Loop Prep
     best_acc = 0.0
     trial_save_dir = os.path.join(config.SAVE_DIR, args.study_name, f"trial_{args.trial_number}")
     os.makedirs(trial_save_dir, exist_ok=True)
     
-    print(f"Start Training: {config.EPOCHS} Epochs")
+    # Alpha 스케줄링을 위한 전체 Step 계산
+    # zip으로 묶이므로 더 짧은 로더의 길이가 한 에폭당 Step 수
+    steps_per_epoch = min(len(source_loader), len(target_loader))
+    total_steps = config.EPOCHS * steps_per_epoch
+    global_step = 0
+    
+    print(f"Start Training: {config.EPOCHS} Epochs (Total Steps: {total_steps})")
+    
     for epoch in range(config.EPOCHS):
         
-        # Train one epoch with Source & Target
-        train_loss, train_acc = train_one_epoch(
+        # global_step을 인자로 넘기고, 업데이트된 값을 반환받음
+        train_loss, train_acc, global_step = train_one_epoch(
             model, source_loader, target_loader, 
             criterion_cls, criterion_domain, criterion_fc, 
-            optimizer, device, scaler, epoch, args
+            optimizer, device, scaler, epoch, args, 
+            global_step, total_steps
         )
         
         val_loss, val_acc = validate_one_epoch(model, val_loader, criterion_cls, device)
@@ -279,7 +278,7 @@ def main():
     # Hyperparameters
     parser.add_argument('--lr', type=float, default=config.LEARNING_RATE)
     parser.add_argument('--dropout', type=float, default=config.DROPOUT)
-    parser.add_argument('--alpha', type=float, default=config.ADVERSARIAL_ALPHA)
+    parser.add_argument('--alpha', type=float, default=config.ADVERSARIAL_ALPHA) # 스케줄링이 적용되므로 이 값은 무시되거나 초기값으로 간주될 수 있음
     parser.add_argument('--prob', type=float, default=config.PROB)
     parser.add_argument('--weight-decay', type=float, default=config.ADAMW_WEIGHT_DECAY)
     parser.add_argument('--smoothing', type=float, default=config.LABEL_SMOOTHING)
