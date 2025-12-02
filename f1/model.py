@@ -146,7 +146,7 @@ class SpatialMixerBlock(nn.Module):
 # 3. Temporal Stream: Factorized Temporal Attention
 # --------------------------------------------------------------------------
 class TemporalFactorizedBlock(nn.Module):
-    def __init__(self, dim, num_heads=4, window_size=5, dropout=0.1):
+    def __init__(self, dim, num_heads=4, window_size=10, dropout=0.1):
         super().__init__()
         self.dim = dim
         self.window_size = window_size
@@ -267,42 +267,41 @@ class ST_GRL_Model(nn.Module):
         self.embedding = SpatioTemporalEmbedding(
             num_coords, hidden_dim, num_joints, config.MAX_FRAMES, dropout
         )
-        
-        # 2. Spatial Encoder (MLP Mixer + SSA)
-        self.spatial_blocks = nn.ModuleList([
-            SpatialMixerBlock(hidden_dim, num_joints, dropout=dropout)
-            for _ in range(spatial_depth)
-        ])
-        
-        # 3. Temporal Encoder (Factorized)
+
+        # 2. [CLS] Token 초기화
         self.cls_token = nn.Parameter(torch.zeros(1, 1, hidden_dim))
         nn.init.trunc_normal_(self.cls_token, std=0.02)
+
+        # 3. Block
+        # Block 1
+        self.spatial_1 = SpatialMixerBlock(hidden_dim, num_joints, dropout=dropout)
+        self.temporal_1 = TemporalFactorizedBlock(hidden_dim, window_size=window_size, dropout=dropout)
+        # Block 2
+        self.spatial_2 = SpatialMixerBlock(hidden_dim, num_joints, dropout=dropout)
+        self.temporal_2 = TemporalFactorizedBlock(hidden_dim, window_size=window_size, dropout=dropout)
         
-        self.temporal_blocks = nn.ModuleList([
-            TemporalFactorizedBlock(hidden_dim, window_size=window_size, dropout=dropout)
-            for _ in range(temporal_depth)
-        ])
-        
+        # Block 3
+        self.spatial_3 = SpatialMixerBlock(hidden_dim, num_joints, dropout=dropout)
+        self.temporal_3 = TemporalFactorizedBlock(hidden_dim, window_size=window_size, dropout=dropout)
+
         # 4. Pooling
         self.attentive_pooling = AttentivePooling(hidden_dim, num_classes)
-        
+
         # 5. Output Heads
-        
-        # Head A: Action Classifier (Source Only)
         self.action_head = nn.Sequential(
             RMSNorm(hidden_dim),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, num_classes)
         )
         
-        # Head B: Domain Discriminator (Source & Target, GRL)
         self.grl = GradientReversalLayer(alpha=1.0)
         self.domain_head = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim, 1), # Binary Classification (Source 0 / Target 1)
+            nn.Linear(hidden_dim, 1), 
         )
+        
 
     def forward(self, x, alpha=1.0):
         # x: (N, C, T, V)
@@ -311,38 +310,87 @@ class ST_GRL_Model(nn.Module):
         # 1. Embedding
         x = self.embedding(x)
         
-        # 2. Spatial Encoding
-        for block in self.spatial_blocks:
-            x = block(x)
-        
-        # 3. Prepare for Temporal (Merge N and V)
-        x_temporal = x.permute(0, 2, 1, 3).reshape(N * V, T, -1)
-        
-        # [CLS] 토큰 추가
+        # [CLS] 토큰 준비 (N*V, 1, D)
+        # 초기에는 Parameter를 복사해서 사용하지만, 층을 지나면서 업데이트된 값을 유지해야 함
         cls_tokens = self.cls_token.expand(N * V, -1, -1)
-        x_temporal = torch.cat((cls_tokens, x_temporal), dim=1)
         
-        # 4. Temporal Encoding
-        for block in self.temporal_blocks:
-            x_temporal = block(x_temporal)
-            
-        # 5. Feature Gathering
-        # 관절 차원 평균 -> (N, T+1, D)
-        x_final_seq = x_temporal.view(N, V, T + 1, -1).mean(dim=1) 
+        # ---------------------------------------------------------
+        # Hard-coded Forward Pass
+        # ---------------------------------------------------------
         
-        # [CLS] 토큰 제외한 실제 프레임 시퀀스 (N, T, D)
-        frame_features = x_final_seq[:, 1:, :]
+        # === Layer 1 ===
+        # 1-1. Spatial (Frames only)
+        x = self.spatial_1(x) # (N, T, V, D)
+        
+        # [Transform for Temporal]
+        # (N, T, V, D) -> (N, V, T, D) -> (N*V, T, D)
+        x_flat = x.permute(0, 2, 1, 3).reshape(N * V, T, -1)
+        # Attach CLS: (N*V, 1, D) + (N*V, T, D) -> (N*V, T+1, D)
+        x_temporal_in = torch.cat((cls_tokens, x_flat), dim=1)
+        
+        # 1-2. Temporal
+        x_temporal_out = self.temporal_1(x_temporal_in)
+        
+        # [Detach CLS & Transform for Spatial]
+        # Split: CLS는 업데이트된 상태로 보존, Frames는 다음 Spatial로 전달
+        cls_tokens = x_temporal_out[:, 0:1, :] # Update CLS for next layer
+        x_flat = x_temporal_out[:, 1:, :]      # Frames
+        
+        # (N*V, T, D) -> (N, V, T, D) -> (N, T, V, D)
+        x = x_flat.view(N, V, T, -1).permute(0, 2, 1, 3)
+
+        # === Layer 2 ===
+        # 2-1. Spatial
+        x = self.spatial_2(x)
+        
+        # [Transform]
+        x_flat = x.permute(0, 2, 1, 3).reshape(N * V, T, -1)
+        x_temporal_in = torch.cat((cls_tokens, x_flat), dim=1) # Use updated CLS
+        
+        # 2-2. Temporal
+        x_temporal_out = self.temporal_2(x_temporal_in)
+        
+        # [Detach]
+        cls_tokens = x_temporal_out[:, 0:1, :]
+        x_flat = x_temporal_out[:, 1:, :]
+        x = x_flat.view(N, V, T, -1).permute(0, 2, 1, 3)
+
+        # === Layer 3 ===
+        # 3-1. Spatial
+        x = self.spatial_3(x)
+        
+        # [Transform]
+        x_flat = x.permute(0, 2, 1, 3).reshape(N * V, T, -1)
+        x_temporal_in = torch.cat((cls_tokens, x_flat), dim=1)
+        
+        # 3-2. Temporal
+        x_temporal_out = self.temporal_3(x_temporal_in)
+
+        # Final Feature Preparation
+        # Temporal Block을 마지막으로 통과했으므로 x_temporal_out 사용
+        
+
+        # Frames만 추출
+        frame_features = x_temporal_out[:, 1:, :] # (N*V, T, D)
+        
+        # Attentive Pooling은 (B, T, D) 입력을 받음. 여기서 B는 N이어야 의미가 있음.
+        # 기존 코드는 (N, V, T+1, D) -> mean(V) -> (N, T+1, D) 였습니다.
+        # 관절(V) 차원에 대해 평균을 내서 비디오 레벨 특징으로 만듭니다.
+        
+        # (N*V, T, D) -> (N, V, T, D)
+        frame_features = frame_features.view(N, V, T, -1)
+        # 관절 차원 평균 -> (N, T, D)
+        frame_features_mean = frame_features.mean(dim=1)
         
         # 6. Attentive Pooling -> (N, D)
-        pooled_features = self.attentive_pooling(frame_features) 
+        pooled_features = self.attentive_pooling(frame_features_mean) 
         
         # 7. Output Heads
         action_logits = self.action_head(pooled_features)
         
-        # Domain Head (GRL 적용)
+        # Domain Head
         self.grl.alpha = alpha 
         domain_feat = self.grl(pooled_features)
         domain_logits = self.domain_head(domain_feat)
         
-        # Feature Consistency를 위해 Pooling된 특징(N, D)을 반환
         return action_logits, domain_logits, pooled_features

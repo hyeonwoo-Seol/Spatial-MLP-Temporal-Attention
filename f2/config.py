@@ -22,8 +22,6 @@ NUM_CLASSES = 60  # 행동 클래스 수 (NTU RGB+D 60)
 PROB = 0.5 # 데이터 증강 확률
 
 HIDDEN_DIM = 128
-SPATIAL_DEPTH = 3    # Spatial Mixer Block 깊이
-TEMPORAL_DEPTH = 3   # Temporal Factorized Block 깊이
 WINDOW_SIZE = 20     # Factorized Attention의 Local Window 크기
 DROPOUT = 0.4
 
@@ -38,5 +36,5 @@ LABEL_SMOOTHING = 0.113
 
 ETA_MIN = 1e-6
 
-ADVERSARIAL_ALPHA = 1.0   # GRL Alpha (train.py argparse default 값으로 사용됨)
+ADVERSARIAL_ALPHA = 0.5   # GRL Alpha (train.py argparse default 값으로 사용됨)
 

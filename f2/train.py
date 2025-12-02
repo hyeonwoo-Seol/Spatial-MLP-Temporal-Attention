@@ -105,7 +105,9 @@ def train_one_epoch(model, source_loader, target_loader, criterion_cls, criterio
         # 수식: alpha = 2 / (1 + exp(-10 * p)) - 1
         # p: 학습 진행률 (0 ~ 1)
         p = float(global_step) / total_steps
-        alpha = 2.0 / (1.0 + np.exp(-10 * p)) - 1
+        sigmoid_val = 2.0 / (1.0 + np.exp(-10 * p)) - 1
+        alpha = sigmoid_val * args.alpha
+        
         
         # --- 1. Source Data Unpacking ---
         src_view1, src_view2, src_labels, _, _ = src_data
@@ -260,8 +262,6 @@ def run_training(args):
         num_coords=config.NUM_COORDS,
         num_classes=config.NUM_CLASSES,
         hidden_dim=config.HIDDEN_DIM,
-        spatial_depth=config.SPATIAL_DEPTH,
-        temporal_depth=config.TEMPORAL_DEPTH,
         window_size=config.WINDOW_SIZE,
         dropout=config.DROPOUT
     ).to(device)
