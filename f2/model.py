@@ -3,30 +3,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import config
-from torch.autograd import Function
 
 # --------------------------------------------------------------------------
 # Utils & Layers
 # --------------------------------------------------------------------------
-
-class GradientReversalFunction(Function):
-    @staticmethod
-    def forward(ctx, input, alpha):
-        ctx.alpha = alpha
-        return input.clone()
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        grad_input = -ctx.alpha * grad_output
-        return grad_input, None
-
-class GradientReversalLayer(nn.Module):
-    def __init__(self, alpha=1.0):
-        super(GradientReversalLayer, self).__init__()
-        self.alpha = alpha
-
-    def forward(self, input):
-        return GradientReversalFunction.apply(input, self.alpha)
 
 class RMSNorm(nn.Module):
     def __init__(self, d, eps=1e-6):
@@ -72,7 +52,6 @@ class SpatialMixerBlock(nn.Module):
         self.dim = dim
         self.num_joints = num_joints
         
-        # [수정] SSA(Attention) 제거하고 순수 MLP Mixer 구조로 변경
         # Token Mixing MLP: 관절(V) 간의 정보 교환
         self.norm1 = RMSNorm(dim)
         self.token_mixing_mlp = nn.Sequential(
@@ -177,7 +156,7 @@ class SwinTemporalBlock(nn.Module):
         self.window_size = window_size
         self.shift_size = shift_size
         
-        # [수정] Bottleneck: 채널 축소 (128 -> 64)
+        # Bottleneck: 채널 축소 (128 -> 64)
         self.dim_inner = int(dim * bottleneck_ratio)
         
         # Linear Projection for Bottleneck (Down / Up)
@@ -276,7 +255,7 @@ class AttentivePooling(nn.Module):
         return x_pooled
 
 # --------------------------------------------------------------------------
-# Main Model: ST-Swin-GRL
+# Main Model: ST_GRL_Model (Modified: No GRL)
 # --------------------------------------------------------------------------
 class ST_GRL_Model(nn.Module):
     def __init__(self, 
@@ -292,9 +271,6 @@ class ST_GRL_Model(nn.Module):
         self.embedding = SpatioTemporalEmbedding(
             num_coords, hidden_dim, num_joints, config.MAX_FRAMES, dropout
         )
-        
-        # Spatial: Pure MLP Mixer (No SSA)
-        # Temporal: Swin with Bottleneck (ratio=0.5 -> 64 channel attn)
         
         self.spatial_1 = SpatialMixerBlock(hidden_dim, num_joints, dropout=dropout)
         self.temporal_1 = SwinTemporalBlock(hidden_dim, num_heads=4, window_size=window_size, shift_size=0, dropout=dropout, bottleneck_ratio=0.5)
@@ -313,15 +289,8 @@ class ST_GRL_Model(nn.Module):
             nn.Linear(hidden_dim, num_classes)
         )
         
-        self.grl = GradientReversalLayer(alpha=1.0)
-        self.domain_head = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, 1), 
-        )
 
-    def forward(self, x, alpha=1.0):
+    def forward(self, x):
         # x: (N, C, T, V)
         N, C, T, V = x.shape
         x = self.embedding(x)
@@ -350,8 +319,5 @@ class ST_GRL_Model(nn.Module):
         
         action_logits = self.action_head(pooled_features)
         
-        self.grl.alpha = alpha 
-        domain_feat = self.grl(pooled_features)
-        domain_logits = self.domain_head(domain_feat)
-        
-        return action_logits, domain_logits, pooled_features
+        # action_logits만 반환
+        return action_logits
