@@ -6,7 +6,11 @@ python preprocess_ntu_data.py
 
 ## 1번 실행하기
 
-python train.py --protocol xview --auto-resume --trial-number 1
+python train.py --protocol xview --alpha 1.0 --study-name GRL_XSub --trial-number 1
+
+
+python train.py --protocol xsub --study-name GRL_XSub --trial-number 1 --auto-resume
+
 
 ## Optuna로 실행하기
 

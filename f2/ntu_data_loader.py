@@ -127,11 +127,27 @@ class NTURGBDDataset(Dataset):
     def __getitem__(self, index):
         # 1. 파일 로드
         data_path = self.samples[index]
+        filename = os.path.basename(data_path)
+        
         data = torch.load(data_path)
         
         raw_features = data['data'] # Shape: (T, V, C)
         action_label = data['label']
         
+        # 파일명 형식: S001C001P001R001A001.pt
+        # S: Subject (9:12), C: Camera (5:8)
+        
+        if self.protocol == 'xsub':
+            # Subject Classification Task (누가 했는지 맞추기 -> 어렵게 만들기)
+            sid = int(filename[9:12])
+            aux_label = sid - 1 
+        elif self.protocol == 'xview':
+            # Camera View Classification Task (어디서 찍었는지 맞추기 -> 어렵게 만들기)
+            cid = int(filename[5:8])
+            aux_label = cid - 1 
+        else:
+            aux_label = 0 # Default
+
         # Max Frame 길이 맞추기
         if raw_features.shape[0] > self.max_frames:
             raw_features = raw_features[:self.max_frames]
@@ -147,7 +163,7 @@ class NTURGBDDataset(Dataset):
 
         
         if self.split == 'train':
-            # 학습 시: 데이터 증강 적용 (1개의 View만 생성)
+            # 학습 시: 데이터 증강 적용
             features, feat_len = self._get_augmented_view(raw_features, real_len)
         else:
             # 검증 시: 원본 그대로 사용
@@ -168,5 +184,4 @@ class NTURGBDDataset(Dataset):
         # ----------------------------------------------------------------------
         features = features.permute(2, 0, 1) # (12, T, 50)
 
-        
-        return features, action_label
+        return features, action_label, aux_label

@@ -28,8 +28,6 @@ def set_seed(seed):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-
-    
 def get_scheduler(optimizer, total_epochs, warmup_epochs):
     print(f"Using 'Warmup + Cosine Annealing' scheduler.")
     
@@ -42,7 +40,13 @@ def get_scheduler(optimizer, total_epochs, warmup_epochs):
     # 3. Sequential (Warmup -> Main)
     return SequentialLR(optimizer, schedulers=[warmup_scheduler, main_scheduler], milestones=[warmup_epochs])
 
-
+# GRL Alpha Scaling 함수
+def get_current_alpha(epoch, total_epochs, max_alpha=1.0):
+    # 학습 초기에는 0에 가깝다가 점차 max_alpha로 수렴하는 스케줄링
+    # 많이 사용되는 수식: 2 / (1 + exp(-10 * p)) - 1
+    p = float(epoch) / total_epochs
+    alpha = 2. / (1. + np.exp(-10 * p)) - 1
+    return max_alpha * alpha
 
 def plot_training_results(train_losses, val_losses, train_accs, val_accs, save_dir):
     if len(train_losses) == 0:
@@ -79,35 +83,48 @@ def plot_training_results(train_losses, val_losses, train_accs, val_accs, save_d
     plt.savefig(save_path)
     plt.close()
 
-
-
-def train_one_epoch(model, source_loader, criterion_cls, optimizer, device, scaler, epoch, args):
+def train_one_epoch(model, source_loader, criterion_cls, criterion_aux, optimizer, device, scaler, epoch, args):
     model.train()
     
     running_loss = 0.0
+    running_loss_act = 0.0
+    running_loss_aux = 0.0
     correct_action = 0
     total_samples = 0
     
-    desc = f"[Train Ep {epoch+1}]"
+    # 현재 Epoch에 따른 Alpha 값 계산 및 적용
+    current_alpha = get_current_alpha(epoch, config.EPOCHS, max_alpha=args.alpha)
+    model.grad_reversal.alpha = current_alpha
+    
+    desc = f"[Train Ep {epoch+1}] A:{current_alpha:.2f}"
     
     # 단일 source_loader 순회
     pbar = tqdm(source_loader, desc=desc, leave=False, colour='green')
     
+    # DataLoader가 aux_labels도 반환함
     for batch in pbar:
-        features, labels = batch
+        features, labels, aux_labels = batch
         features = features.to(device)
         labels = labels.to(device)
+        aux_labels = aux_labels.to(device) # Domain Label (Subject or Camera)
         
         batch_size = features.size(0)
         
         optimizer.zero_grad()
         
         with autocast('cuda'):
-            # 모델 Forward: alpha 인자 제거
-            logits = model(features)
+            # 모델이 두 개의 Logit 반환
+            action_logits, aux_logits = model(features)
             
-            # Loss 계산: 오직 Classification Loss만 계산
-            loss = criterion_cls(logits, labels)
+            # Loss 1: Main Task (Action Classification)
+            loss_action = criterion_cls(action_logits, labels)
+            
+            # Loss 2: Auxiliary Task (Domain Classification)
+            # GRL이 적용되어 있으므로, 이 Loss를 최소화하려 하면 Feature Extractor는 반대로 학습됨
+            loss_aux = criterion_aux(aux_logits, aux_labels)
+            
+            # Total Loss
+            loss = loss_action + loss_aux
 
         # Backward
         scaler.scale(loss).backward()
@@ -118,21 +135,23 @@ def train_one_epoch(model, source_loader, criterion_cls, optimizer, device, scal
         
         # Stats Update
         running_loss += loss.item() * batch_size
+        running_loss_act += loss_action.item() * batch_size
+        running_loss_aux += loss_aux.item() * batch_size
         total_samples += batch_size
         
-        # Acc 계산
-        _, predicted = torch.max(logits, 1)
+        # Acc 계산 (Action에 대해서만)
+        _, predicted = torch.max(action_logits, 1)
         correct_action += (predicted == labels).sum().item()
         
         # Logging
         pbar.set_postfix({
-            'Loss': f"{loss.item():.3f}", 
+            'L_Tot': f"{loss.item():.3f}",
+            'L_Act': f"{loss_action.item():.3f}",
+            'L_Aux': f"{loss_aux.item():.3f}", 
             'Acc': f"{correct_action/total_samples:.3f}"
         })
         
     return running_loss / total_samples, correct_action / total_samples
-
-
 
 def validate_one_epoch(model, loader, criterion_cls, device):
     model.eval()
@@ -140,23 +159,24 @@ def validate_one_epoch(model, loader, criterion_cls, device):
     correct_action = 0
     total_samples = 0
     
+    
     with torch.no_grad():
-        for features, labels in tqdm(loader, desc="[Val]", leave=False, colour='cyan'):
+        # DataLoader 반환값 변경 대응
+        for features, labels, _ in tqdm(loader, desc="[Val]", leave=False, colour='cyan'):
             features = features.to(device)
             labels = labels.to(device)
             
             with autocast('cuda'):
-                logits = model(features) 
-                loss = criterion_cls(logits, labels)
+                # 튜플 반환값 중 action_logits만 사용
+                action_logits, _ = model(features) 
+                loss = criterion_cls(action_logits, labels)
                 
             running_loss += loss.item() * features.size(0)
-            _, predicted = torch.max(logits, 1)
+            _, predicted = torch.max(action_logits, 1)
             correct_action += (predicted == labels).sum().item()
             total_samples += features.size(0)
             
     return running_loss / total_samples, correct_action / total_samples
-
-
 
 def run_training(args):
     set_seed(config.SEED)
@@ -169,7 +189,7 @@ def run_training(args):
     
     device = config.DEVICE
     print(f"\n[Info] Device: {device}, Protocol: {args.protocol}")
-    print(f"[Info] Mode: Pure Supervised Learning (No UDA/GRL)")
+    print(f"[Info] Mode: Adversarial Learning (GRL) | Max Alpha: {args.alpha}")
     
     # ----------------------------------------------------------------------
     # 1. Dataset & Loader Setup
@@ -180,7 +200,7 @@ def run_training(args):
     # Source Dataset (Train)
     source_dataset = NTURGBDDataset(config.DATASET_PATH, split='train', max_frames=config.MAX_FRAMES, protocol=args.protocol)
     source_loader = torch.utils.data.DataLoader(
-        source_dataset, batch_size=config.BATCH_SIZE, # [수정] Batch Size 나누기(/2) 제거
+        source_dataset, batch_size=config.BATCH_SIZE, 
         shuffle=True, num_workers=config.NUM_WORKERS, pin_memory=config.PIN_MEMORY, generator=g, drop_last=True
     )
     
@@ -193,6 +213,18 @@ def run_training(args):
     
     print(f"Training Samples: {len(source_dataset)}, Validation Samples: {len(val_dataset)}")
 
+    # Protocol에 따른 보조 클래스(Auxiliary Class) 개수 설정
+    if args.protocol == 'xsub':
+        # NTU RGB+D Subject IDs: 1 ~ 40 (최대값 기준 여유있게 잡거나 정확히 설정)
+        num_aux_classes = 40 
+    elif args.protocol == 'xview':
+        # Camera IDs: 1, 2, 3
+        num_aux_classes = 3
+    else:
+        num_aux_classes = 1 # Dummy
+    
+    print(f"[Info] Num Aux Classes (Domain): {num_aux_classes}")
+
     # 2. Model Init
     model = ST_GRL_Model(
         num_joints=config.NUM_JOINTS,
@@ -200,7 +232,8 @@ def run_training(args):
         num_classes=config.NUM_CLASSES,
         hidden_dim=config.HIDDEN_DIM,
         window_size=config.WINDOW_SIZE,
-        dropout=config.DROPOUT
+        dropout=config.DROPOUT,
+        num_aux_classes=num_aux_classes # 인자 전달
     ).to(device)
     
     # 3. Optim & Loss
@@ -211,6 +244,7 @@ def run_training(args):
     scaler = GradScaler('cuda')
     
     criterion_cls = nn.CrossEntropyLoss(label_smoothing=config.LABEL_SMOOTHING)
+    criterion_aux = nn.CrossEntropyLoss() # 보조 태스크용 Loss (Label Smoothing 보통 안 함)
     
     # 4. Training Loop Prep
     best_acc = 0.0
@@ -259,8 +293,9 @@ def run_training(args):
     
     try:
         for epoch in range(start_epoch, config.EPOCHS):
+            # criterion_aux 추가 전달
             train_loss, train_acc = train_one_epoch(
-                model, source_loader, criterion_cls, 
+                model, source_loader, criterion_cls, criterion_aux, 
                 optimizer, device, scaler, epoch, args
             )
             
@@ -308,7 +343,6 @@ def run_training(args):
     print(f"Training Finished. Best Val Acc: {best_acc:.4f}")
     return best_acc
 
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--protocol', type=str, default='xsub', choices=['xsub', 'xview'])
@@ -326,6 +360,8 @@ def main():
     parser.add_argument('--weight-decay', type=float, default=config.ADAMW_WEIGHT_DECAY)
     parser.add_argument('--smoothing', type=float, default=config.LABEL_SMOOTHING)
     
+    # GRL Max Alpha Argument
+    parser.add_argument('--alpha', type=float, default=1.0, help="Max value for GRL alpha")
 
     args = parser.parse_args()
     

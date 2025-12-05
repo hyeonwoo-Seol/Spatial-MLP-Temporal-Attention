@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import config
+from torch.autograd import Function
 
 # --------------------------------------------------------------------------
 # Utils & Layers
@@ -17,6 +18,29 @@ class RMSNorm(nn.Module):
     def forward(self, x):
         rsqrt = torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
         return x * rsqrt * self.weight
+
+# --------------------------------------------------------------------------
+# Gradient Reversal Layer (GRL)
+# --------------------------------------------------------------------------
+class GradientReversalFunction(Function):
+    @staticmethod
+    def forward(ctx, input, alpha):
+        ctx.alpha = alpha
+        return input.clone()
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        # 역전파 시 gradient의 부호를 반전시키고 alpha를 곱함
+        grad_input = -ctx.alpha * grad_output
+        return grad_input, None
+
+class GradientReversalLayer(nn.Module):
+    def __init__(self, alpha=1.0):
+        super(GradientReversalLayer, self).__init__()
+        self.alpha = alpha
+
+    def forward(self, input):
+        return GradientReversalFunction.apply(input, self.alpha)
 
 # --------------------------------------------------------------------------
 # 1. Embedding Layer
@@ -255,7 +279,7 @@ class AttentivePooling(nn.Module):
         return x_pooled
 
 # --------------------------------------------------------------------------
-# Main Model: ST_GRL_Model (Modified: No GRL)
+# Main Model: ST_GRL_Model (GRL Applied)
 # --------------------------------------------------------------------------
 class ST_GRL_Model(nn.Module):
     def __init__(self, 
@@ -265,6 +289,7 @@ class ST_GRL_Model(nn.Module):
                  hidden_dim=128,
                  window_size=config.WINDOW_SIZE,
                  dropout=config.DROPOUT,
+                 num_aux_classes=0,
                  **kwargs):
         
         super().__init__()
@@ -283,12 +308,20 @@ class ST_GRL_Model(nn.Module):
 
         self.attentive_pooling = AttentivePooling(hidden_dim, num_classes)
 
+        # 1. Main Action Classifier
         self.action_head = nn.Sequential(
             RMSNorm(hidden_dim),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, num_classes)
         )
         
+        # 2. Domain (Auxiliary) Classifier & GRL
+        self.grad_reversal = GradientReversalLayer(alpha=1.0) # alpha는 학습 중 조정
+        self.aux_classifier = nn.Sequential(
+            RMSNorm(hidden_dim),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, num_aux_classes)
+        )
 
     def forward(self, x):
         # x: (N, C, T, V)
@@ -312,12 +345,20 @@ class ST_GRL_Model(nn.Module):
         x_temporal = x.permute(0, 2, 1, 3).contiguous().reshape(N * V, T, -1)
         x_temporal = self.temporal_3(x_temporal)
         
-        # Final
+        # Final Feature Aggregation
         final_features = x_temporal.reshape(N, V, T, -1)
         frame_features_mean = final_features.mean(dim=1)
+        
+        # (N, D)
         pooled_features = self.attentive_pooling(frame_features_mean) 
         
+        # --- Branch 1: Main Task (Action Recognition) ---
         action_logits = self.action_head(pooled_features)
         
-        # action_logits만 반환
-        return action_logits
+        # --- Branch 2: Auxiliary Task (Domain Classification with GRL) ---
+        # GRL 적용 (Forward: Identity, Backward: Negative Gradient)
+        reversed_features = self.grad_reversal(pooled_features)
+        aux_logits = self.aux_classifier(reversed_features)
+        
+        # 두 개의 Logit을 모두 반환
+        return action_logits, aux_logits
