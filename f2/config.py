@@ -25,7 +25,7 @@ HIDDEN_DIM = 128
 WINDOW_SIZE = 20     # Factorized Attention의 Local Window 크기
 DROPOUT = 0.4
 
-EPOCHS = 50               # 총 학습 에폭
+EPOCHS = 33               # 총 학습 에폭
 LEARNING_RATE = 0.000565   
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 

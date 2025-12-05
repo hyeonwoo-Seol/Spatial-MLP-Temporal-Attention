@@ -43,6 +43,33 @@ class GradientReversalLayer(nn.Module):
         return GradientReversalFunction.apply(input, self.alpha)
 
 # --------------------------------------------------------------------------
+# Temporal Downsampling Layer (New)
+# --------------------------------------------------------------------------
+class TemporalDownsample(nn.Module):
+    """
+    Applies strided 1D convolution to reduce temporal resolution by half.
+    Input: (B, T, D) where B is usually N * V
+    Output: (B, T//2, D)
+    """
+    def __init__(self, dim, kernel_size=3, stride=2, padding=1):
+        super().__init__()
+        self.conv = nn.Conv1d(dim, dim, kernel_size=kernel_size, stride=stride, padding=padding)
+        self.norm = RMSNorm(dim)
+
+    def forward(self, x):
+        # x: (B, T, D)
+        B, T, D = x.shape
+        
+        # Conv1d expects (Batch, Channel, Length) -> Transpose to (B, D, T)
+        x = x.transpose(1, 2)
+        x = self.conv(x)
+        
+        # Back to (B, T', D)
+        x = x.transpose(1, 2)
+        x = self.norm(x)
+        return x
+
+# --------------------------------------------------------------------------
 # 1. Embedding Layer
 # --------------------------------------------------------------------------
 class SpatioTemporalEmbedding(nn.Module):
@@ -297,12 +324,18 @@ class ST_GRL_Model(nn.Module):
             num_coords, hidden_dim, num_joints, config.MAX_FRAMES, dropout
         )
         
+        # --- Stage 1 ---
         self.spatial_1 = SpatialMixerBlock(hidden_dim, num_joints, dropout=dropout)
         self.temporal_1 = SwinTemporalBlock(hidden_dim, num_heads=4, window_size=window_size, shift_size=0, dropout=dropout, bottleneck_ratio=0.5)
         
+        # --- Early Downsampling (New) ---
+        self.downsample = TemporalDownsample(hidden_dim, kernel_size=3, stride=2, padding=1)
+        
+        # --- Stage 2 ---
         self.spatial_2 = SpatialMixerBlock(hidden_dim, num_joints, dropout=dropout)
         self.temporal_2 = SwinTemporalBlock(hidden_dim, num_heads=4, window_size=window_size, shift_size=window_size//2, dropout=dropout, bottleneck_ratio=0.5)
         
+        # --- Stage 3 ---
         self.spatial_3 = SpatialMixerBlock(hidden_dim, num_joints, dropout=dropout)
         self.temporal_3 = SwinTemporalBlock(hidden_dim, num_heads=4, window_size=window_size, shift_size=0, dropout=dropout, bottleneck_ratio=0.5)
 
@@ -328,25 +361,36 @@ class ST_GRL_Model(nn.Module):
         N, C, T, V = x.shape
         x = self.embedding(x)
         
-        # Layer 1
+        # --- Layer 1 ---
         x = self.spatial_1(x) 
+        # Transform for Temporal: (N*V, T, D)
         x_temporal = x.permute(0, 2, 1, 3).contiguous().reshape(N * V, T, -1)
         x_temporal = self.temporal_1(x_temporal)
-        x = x_temporal.reshape(N, V, T, -1).permute(0, 2, 1, 3)
+        
+        # --- Downsampling ---
+        x_temporal = self.downsample(x_temporal) # (N*V, T/2, D)
+        
+        # Get new T (Dynamic Shape)
+        # x_temporal is (Batch_Size, Time, Channels)
+        _, current_T, _ = x_temporal.shape
+        
+        # Reshape back to Spatial: (N, T', V, D)
+        x = x_temporal.reshape(N, V, current_T, -1).permute(0, 2, 1, 3)
 
-        # Layer 2
+        # --- Layer 2 ---
         x = self.spatial_2(x)
-        x_temporal = x.permute(0, 2, 1, 3).contiguous().reshape(N * V, T, -1)
+        # Use current_T for reshape
+        x_temporal = x.permute(0, 2, 1, 3).contiguous().reshape(N * V, current_T, -1)
         x_temporal = self.temporal_2(x_temporal)
-        x = x_temporal.reshape(N, V, T, -1).permute(0, 2, 1, 3)
+        x = x_temporal.reshape(N, V, current_T, -1).permute(0, 2, 1, 3)
 
-        # Layer 3
+        # --- Layer 3 ---
         x = self.spatial_3(x)
-        x_temporal = x.permute(0, 2, 1, 3).contiguous().reshape(N * V, T, -1)
+        x_temporal = x.permute(0, 2, 1, 3).contiguous().reshape(N * V, current_T, -1)
         x_temporal = self.temporal_3(x_temporal)
         
         # Final Feature Aggregation
-        final_features = x_temporal.reshape(N, V, T, -1)
+        final_features = x_temporal.reshape(N, V, current_T, -1)
         frame_features_mean = final_features.mean(dim=1)
         
         # (N, D)
