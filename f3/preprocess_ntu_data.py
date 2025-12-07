@@ -8,7 +8,13 @@
 # 2. 척추 길이 정규화 (Normalization) 복구
 # 3. log1p 제거 (물리적 선형성 유지)
 # ##----------------------------------------------------------------------------
-
+# [수정 사항 2025-11-27]
+# - 효율성 개선: 좌표 단계에서 먼저 200프레임으로 자르고 계산.
+# - [Data Leakage Fix] X-Sub와 X-View 프로토콜의 통계를 분리하여 계산 및 저장.
+# [수정 사항 2025-12-06] (현우님 요청)
+# - Temporal Downsampling [::2] 제거: 원본 30fps 데이터를 그대로 보존.
+# - 모델 내부에서 Downsampling을 수행하기 위함.
+# ##----------------------------------------------------------------------------
 
 import os
 import numpy as np
@@ -17,11 +23,11 @@ from tqdm import tqdm
 import config
 from multiprocessing import Pool, cpu_count
 
-# >> 경로 설정
+# >> 경로 설정 (config와 일치시켜주세요)
 SOURCE_DATA_PATH = '../../paper-review/Action_Recognition/Code/nturgbd01/' 
 TARGET_DATA_PATH = '../nturgbd_processed_12D_Norm/' 
 
-# >> 통계 파일 경로 분리
+# [수정] 통계 파일 경로 분리
 STATS_FILE_XSUB = '../stats_xsub.npz'
 STATS_FILE_XVIEW = '../stats_xview.npz'
 
@@ -29,11 +35,11 @@ MAX_FRAMES = config.MAX_FRAMES
 NUM_JOINTS = config.NUM_JOINTS
 BASE_NUM_JOINTS = 25
 
-# >> Protocol Definitions
+# Protocol Definitions
 TRAINING_SUBJECTS = [1, 2, 4, 5, 8, 9, 13, 14, 15, 16, 17, 18, 19, 25, 27, 28, 31, 34, 35, 38]
-TRAINING_CAMERAS = [2, 3]
+TRAINING_CAMERAS = [2, 3] # [수정] X-View Training Cameras
 
-# >> 뼈 연결 정보 (부모, 자식)
+# 뼈 연결 정보 (부모, 자식)
 SKELETON_BONES = [
     (20, 1), (1, 0), (20, 2), (2, 3),
     (20, 4), (4, 5), (5, 6), (6, 7), (7, 21), (7, 22),
@@ -42,8 +48,8 @@ SKELETON_BONES = [
     (0, 16), (16, 17), (17, 18), (18, 19)
 ]
 
-# >> 
 def _read_skeleton_file(filepath):
+    """기존과 동일한 스켈레톤 파일 읽기 함수"""
     try:
         with open(filepath, 'r') as f:
             first_line = f.readline()
@@ -119,9 +125,8 @@ def _read_skeleton_file(filepath):
         
     return final_coords
 
-
-# >> 12차원 벡터 특징 계산 함수
 def _calculate_features(coords):
+    """12차원 벡터 특징 계산 함수"""
     T = coords.shape[0]
     if T == 0:
         return np.zeros((0, NUM_JOINTS, config.NUM_COORDS))
@@ -193,9 +198,8 @@ def _calculate_features(coords):
     
     return np.concatenate((person1, person2), axis=1)
 
-
-# >> 통계 계산 함수
 def process_file_for_stats(filename):
+    """[수정됨] 통계 계산용 워커 함수: X-Sub, X-View 여부를 함께 반환"""
     if not filename.endswith('.skeleton'): return None
     
     # Protocol 판별
@@ -212,9 +216,17 @@ def process_file_for_stats(filename):
     coords = _read_skeleton_file(path)
     if coords.shape[0] == 0: return None
     
-    coords = coords[:MAX_FRAMES]
-
-    features = _calculate_features(coords)
+    # [수정] 2배수 제한 제거 -> 1배수 (MAX_FRAMES)
+    # 왜냐하면 이제 [::2] 다운샘플링을 하지 않기 때문입니다.
+    # 하지만 통계 계산 시에는 모든 유효 프레임을 다 쓰는 것이 좋으므로
+    # MAX_FRAMES 제한을 넉넉하게 두거나 제거해도 되지만, 일관성을 위해 유지합니다.
+    # 기존: limit_frames = MAX_FRAMES * 2
+    limit_frames = MAX_FRAMES 
+    
+    cropped_coords = coords[:limit_frames]
+    
+    # [수정] [::2] 제거하여 모든 프레임 사용
+    features = _calculate_features(cropped_coords)
     
     features_flat = features.reshape(-1, config.NUM_COORDS)
     
@@ -226,9 +238,8 @@ def process_file_for_stats(filename):
     # (카운트, 합, 제곱합, X-Sub여부, X-View여부) 반환
     return (valid_data.shape[0], valid_data.sum(axis=0), np.sum(valid_data**2, axis=0), is_xsub_train, is_xview_train)
 
-
-# >> 통계 계산 및 분리 저장
 def calculate_and_save_stats():
+    """[수정됨] 통계(Mean, Std) 계산 및 분리 저장 (X-Sub / X-View)"""
     print("--- Calculating Stats for 12D Features (Separate for X-Sub / X-View) ---")
     filenames = os.listdir(SOURCE_DATA_PATH)
     
@@ -273,9 +284,8 @@ def calculate_and_save_stats():
     np.savez(STATS_FILE_XVIEW, mean=mean_view, std=std_view)
     print(f"X-View Stats saved to {STATS_FILE_XVIEW}")
 
-
-# >> 최종 전처리 및 저장
 def process_and_save_file(filename):
+    """최종 전처리 및 저장"""
     if not filename.endswith('.skeleton'): return
     
     path = os.path.join(SOURCE_DATA_PATH, filename)
@@ -285,15 +295,17 @@ def process_and_save_file(filename):
         feat = np.zeros((MAX_FRAMES, NUM_JOINTS, config.NUM_COORDS))
         label = 0
     else:
-        coords = coords[:MAX_FRAMES]
-        feat_raw = _calculate_features(coords)
+        # [수정] 2배수 제거, [::2] 제거
+        limit_frames = MAX_FRAMES 
+        cropped_coords = coords[:limit_frames]
+        feat_raw = _calculate_features(cropped_coords) # Full Frame
         
         T = feat_raw.shape[0]
         if T < MAX_FRAMES:
             pad = np.zeros((MAX_FRAMES - T, NUM_JOINTS, config.NUM_COORDS))
             feat = np.concatenate([feat_raw, pad], axis=0)
         else:
-            feat = feat_raw
+            feat = feat_raw[:MAX_FRAMES]
             
         label = int(filename[17:20]) - 1
 
@@ -302,8 +314,6 @@ def process_and_save_file(filename):
         'label': label
     }, os.path.join(TARGET_DATA_PATH, filename.replace('.skeleton', '.pt')))
 
-
-    
 def main():
     if not os.path.exists(TARGET_DATA_PATH):
         os.makedirs(TARGET_DATA_PATH)
@@ -312,14 +322,12 @@ def main():
     if not os.path.exists(STATS_FILE_XSUB) or not os.path.exists(STATS_FILE_XVIEW):
         calculate_and_save_stats()
         
-    print("--- Processing All Files ---")
+    print("--- Processing All Files (Full Resolution, No [::2]) ---")
     filenames = os.listdir(SOURCE_DATA_PATH)
     num_cores = cpu_count() - 1 if cpu_count() > 1 else 1
     
     with Pool(num_cores) as pool:
         list(tqdm(pool.imap_unordered(process_and_save_file, filenames), total=len(filenames)))
 
-
-        
 if __name__ == '__main__':
     main()
