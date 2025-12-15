@@ -19,11 +19,11 @@ NUM_JOINTS = 50   # 관절 수 (25 joints * 2 persons)
 NUM_COORDS = 12   # 입력 차원 (Preprocess에서 생성된 12차원 벡터)
 NUM_CLASSES = 60  # 행동 클래스 수 (NTU RGB+D 60)
 
-PROB = 0.6 # 데이터 증강 확률
+PROB = 0.648 # 데이터 증강 확률
 
 HIDDEN_DIM = 128
 WINDOW_SIZE = 10     # Factorized Attention의 Local Window 크기
-DROPOUT = 0.2
+DROPOUT = 0.11
 
 EPOCHS = 40               # 총 학습 에폭
 LEARNING_RATE = 0.000744   

@@ -21,3 +21,7 @@ python optuna_search.py --study-name ntuexperiment_01 --n-trials 50 --protocol x
 
 python train.py --protocol xsub | tee log.txt
 python train.py --protocol xview | tee log.txt
+
+## optuna
+
+ptuna-dashboard sqlite:///optuna_study.db
