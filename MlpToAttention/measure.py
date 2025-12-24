@@ -3,7 +3,7 @@ import time
 import numpy as np
 from ptflops import get_model_complexity_info
 import config
-from model import ST_Model  # [수정] ST_GRL_Model -> ST_Model 변경
+from model import ST_Model
 
 def input_constructor(input_res):
     """
@@ -25,17 +25,8 @@ def measure_efficiency():
     device = config.DEVICE
     print(f"Using device: {device}")
 
-    # [수정] ST_Model 인스턴스화 (GRL 제거로 num_aux_classes 불필요)
-    # config의 기본값을 사용하므로 인자 없이 호출하거나 필요한 경우 명시할 수 있습니다.
-    model = ST_Model(
-        num_joints=config.NUM_JOINTS,
-        num_coords=config.NUM_COORDS,
-        num_classes=config.NUM_CLASSES,
-        hidden_dim=config.HIDDEN_DIM,
-        window_size=config.WINDOW_SIZE,
-        dropout=config.DROPOUT
-    ).to(device)
-    
+    # ST_Model 인스턴스화 (num_aux_classes 제거)
+    model = ST_Model().to(device)
     model.eval()
 
     # ----------------------------------------------------------------------

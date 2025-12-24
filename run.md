@@ -6,7 +6,7 @@ python preprocess_ntu_data.py
 
 ## 1번 실행하기
 
-python train.py --protocol xview --alpha 1.0 --study-name GRL_XView --trial-number 1
+python train.py --protocol xview --study-name GRL_XView --trial-number 1
 
 
 python train.py --protocol xsub --study-name GRL_XSub --trial-number 1 --auto-resume
