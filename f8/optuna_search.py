@@ -9,24 +9,23 @@ import sys
 class TrainArgs:
     def __init__(self, trial, base_args):
         # 1. 탐색할 하이퍼파라미터 범위 설정 (Trial 객체 사용)
-        self.lr = trial.suggest_float("lr", 1e-5, 1e-3, log=True)
+        self.lr = trial.suggest_float("lr", 1e-4, 1e-3, log=True)
         self.dropout = trial.suggest_float("dropout", 0.1, 0.5)
         self.alpha = trial.suggest_float("alpha", 0.1, 1.0)
-        self.prob = trial.suggest_float("prob", 0.1, 0.5) # Augmentation 확률
-        self.weight_decay = trial.suggest_float("weight_decay", 1e-5, 1e-3, log=True)
+        self.prob = trial.suggest_float("prob", 0.3, 0.8) # Augmentation 확률
+        self.weight_decay = trial.suggest_float("weight_decay", 1e-4, 1e-3, log=True)
         self.smoothing = trial.suggest_float("smoothing", 0.0, 0.2)
         
-        # Loss 가중치 튜닝
-        self.lambda_fc = trial.suggest_float("lambda_fc", 0.001, 0.1, log=True)
-        self.lambda_dom = trial.suggest_float("lambda_dom", 0.001, 0.1, log=True)
-
-        # Scheduler 선택
-        self.scheduler = trial.suggest_categorical("scheduler", ["cosine_decay", "cosine_restarts"])
 
         # 2. 고정 파라미터 (커맨드라인에서 받은 값 유지)
         self.protocol = base_args.protocol
         self.study_name = base_args.study_name
         self.trial_number = trial.number
+        
+        # 3. train.py 호환성을 위한 필수 파라미터 추가 (기본값 설정)
+        # train.py의 run_training 함수가 args.resume과 args.auto_resume을 참조하므로 필수입니다.
+        self.resume = None
+        self.auto_resume = False
         
         # 기타 필요한 설정들 (train.py의 main 참조)
         # train.py 내부 로직에서 args.xxx 형태로 접근하는 모든 변수가 여기 있어야 함

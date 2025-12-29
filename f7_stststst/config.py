@@ -23,7 +23,7 @@ PROB = 0.648 # 데이터 증강 확률
 
 HIDDEN_DIM = 128
 WINDOW_SIZE = 10     # Factorized Attention의 Local Window 크기
-DROPOUT = 0.11
+DROPOUT = 0.2
 
 EPOCHS = 40               # 총 학습 에폭
 LEARNING_RATE = 0.000744   
@@ -31,7 +31,7 @@ DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 WARMUP_EPOCHS = 10         # Linear Warmup 기간
 GRAD_CLIP_NORM = 1.0      # Gradient Clipping Threshold
-ADAMW_WEIGHT_DECAY = 0.0153 
+ADAMW_WEIGHT_DECAY = 0.07 
 LABEL_SMOOTHING = 0.15  
 
 ETA_MIN = 1e-6

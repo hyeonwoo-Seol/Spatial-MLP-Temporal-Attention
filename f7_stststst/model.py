@@ -3,7 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import config
-from torch.autograd import Function
 
 # --------------------------------------------------------------------------
 # Utils & Layers
@@ -20,30 +19,7 @@ class RMSNorm(nn.Module):
         return x * rsqrt * self.weight
 
 # --------------------------------------------------------------------------
-# Gradient Reversal Layer (GRL)
-# --------------------------------------------------------------------------
-class GradientReversalFunction(Function):
-    @staticmethod
-    def forward(ctx, input, alpha):
-        ctx.alpha = alpha
-        return input.clone()
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        # 역전파 시 gradient의 부호를 반전시키고 alpha를 곱함
-        grad_input = -ctx.alpha * grad_output
-        return grad_input, None
-
-class GradientReversalLayer(nn.Module):
-    def __init__(self, alpha=1.0):
-        super(GradientReversalLayer, self).__init__()
-        self.alpha = alpha
-
-    def forward(self, input):
-        return GradientReversalFunction.apply(input, self.alpha)
-
-# --------------------------------------------------------------------------
-# Temporal Downsampling Layer (New)
+# Temporal Downsampling Layer
 # --------------------------------------------------------------------------
 class TemporalDownsample(nn.Module):
     """
@@ -349,9 +325,9 @@ class AttentivePooling(nn.Module):
         return x_pooled
 
 # --------------------------------------------------------------------------
-# Main Model: ST_GRL_Model (GRL Applied)
+# Main Model: ST_Model (GRL Removed)
 # --------------------------------------------------------------------------
-class ST_GRL_Model(nn.Module):
+class ST_Model(nn.Module):
     def __init__(self, 
                  num_joints=config.NUM_JOINTS, 
                  num_coords=config.NUM_COORDS, 
@@ -359,7 +335,6 @@ class ST_GRL_Model(nn.Module):
                  hidden_dim=128,
                  window_size=config.WINDOW_SIZE, # 기본 10
                  dropout=config.DROPOUT,
-                 num_aux_classes=0,
                  **kwargs):
         
         super().__init__()
@@ -395,6 +370,11 @@ class ST_GRL_Model(nn.Module):
         # Shift 없음: [0, 0]
         self.temporal_3 = SwinTemporalBlock(hidden_dim, num_heads=4, window_sizes=window_sizes, shift_sizes=[0, 0], dropout=dropout, bottleneck_ratio=0.5)
 
+        # --- Stage 4 ---
+        self.spatial_4 = SpatialMixerBlock(hidden_dim, num_joints, dropout=dropout)
+        # Shift 적용: [5, 10]
+        self.temporal_4 = SwinTemporalBlock(hidden_dim, num_heads=4, window_sizes=window_sizes, shift_sizes=[ss_small, ss_large], dropout=dropout, bottleneck_ratio=0.5)
+
         self.attentive_pooling = AttentivePooling(hidden_dim, num_classes)
 
         # 1. Main Action Classifier
@@ -403,14 +383,7 @@ class ST_GRL_Model(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, num_classes)
         )
-        
-        # 2. Domain (Auxiliary) Classifier & GRL
-        self.grad_reversal = GradientReversalLayer(alpha=1.0) # alpha는 학습 중 조정
-        self.aux_classifier = nn.Sequential(
-            RMSNorm(hidden_dim),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, num_aux_classes)
-        )
+        # GRL and Aux Classifier Removed
 
     def forward(self, x):
         # x: (N, C, T, V)
@@ -444,6 +417,11 @@ class ST_GRL_Model(nn.Module):
         x = self.spatial_3(x)
         x_temporal = x.permute(0, 2, 1, 3).contiguous().reshape(N * V, current_T, -1)
         x_temporal = self.temporal_3(x_temporal)
+
+        # --- Layer 4 ---
+        x = self.spatial_4(x)
+        x_temporal = x.permute(0, 2, 1, 3).contiguous().reshape(N * V, current_T, -1)
+        x_temporal = self.temporal_4(x_temporal)
         
         # Final Feature Aggregation
         final_features = x_temporal.reshape(N, V, current_T, -1)
@@ -455,10 +433,5 @@ class ST_GRL_Model(nn.Module):
         # --- Branch 1: Main Task (Action Recognition) ---
         action_logits = self.action_head(pooled_features)
         
-        # --- Branch 2: Auxiliary Task (Domain Classification with GRL) ---
-        # GRL 적용 (Forward: Identity, Backward: Negative Gradient)
-        reversed_features = self.grad_reversal(pooled_features)
-        aux_logits = self.aux_classifier(reversed_features)
-        
-        # 두 개의 Logit을 모두 반환
-        return action_logits, aux_logits
+        # Return only action logits
+        return action_logits

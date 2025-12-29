@@ -3,12 +3,12 @@ import time
 import numpy as np
 from ptflops import get_model_complexity_info
 import config
-from model import ST_GRL_Model
+from model import ST_Model  # [수정] ST_GRL_Model -> ST_Model 변경
 
 def input_constructor(input_res):
     """
     ptflops가 모델에 입력을 넣을 때 사용하는 생성자 함수입니다.
-    ST_GRL_Model은 단일 입력 (N, C, T, V)를 받습니다.
+    ST_Model은 단일 입력 (N, C, T, V)를 받습니다.
     """
     batch_size = 1
     # config에 정의된 차원 사용
@@ -25,8 +25,17 @@ def measure_efficiency():
     device = config.DEVICE
     print(f"Using device: {device}")
 
-    # ST_GRL_Model 인스턴스화 (xsub 프로토콜 기준 aux_classes=40 설정)
-    model = ST_GRL_Model(num_aux_classes=40).to(device)
+    # [수정] ST_Model 인스턴스화 (GRL 제거로 num_aux_classes 불필요)
+    # config의 기본값을 사용하므로 인자 없이 호출하거나 필요한 경우 명시할 수 있습니다.
+    model = ST_Model(
+        num_joints=config.NUM_JOINTS,
+        num_coords=config.NUM_COORDS,
+        num_classes=config.NUM_CLASSES,
+        hidden_dim=config.HIDDEN_DIM,
+        window_size=config.WINDOW_SIZE,
+        dropout=config.DROPOUT
+    ).to(device)
+    
     model.eval()
 
     # ----------------------------------------------------------------------

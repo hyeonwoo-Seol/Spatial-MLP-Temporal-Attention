@@ -3,7 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import config
-from torch.autograd import Function
 
 # --------------------------------------------------------------------------
 # Utils & Layers
@@ -20,30 +19,7 @@ class RMSNorm(nn.Module):
         return x * rsqrt * self.weight
 
 # --------------------------------------------------------------------------
-# Gradient Reversal Layer (GRL)
-# --------------------------------------------------------------------------
-class GradientReversalFunction(Function):
-    @staticmethod
-    def forward(ctx, input, alpha):
-        ctx.alpha = alpha
-        return input.clone()
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        # 역전파 시 gradient의 부호를 반전시키고 alpha를 곱함
-        grad_input = -ctx.alpha * grad_output
-        return grad_input, None
-
-class GradientReversalLayer(nn.Module):
-    def __init__(self, alpha=1.0):
-        super(GradientReversalLayer, self).__init__()
-        self.alpha = alpha
-
-    def forward(self, input):
-        return GradientReversalFunction.apply(input, self.alpha)
-
-# --------------------------------------------------------------------------
-# Temporal Downsampling Layer (New)
+# Temporal Downsampling Layer
 # --------------------------------------------------------------------------
 class TemporalDownsample(nn.Module):
     """
@@ -144,7 +120,7 @@ class SpatialMixerBlock(nn.Module):
         return x
 
 # --------------------------------------------------------------------------
-# 3. Temporal Stream: Swin Transformer with Bottleneck
+# 3. Temporal Stream: Multi-Scale Swin Transformer (Modified)
 # --------------------------------------------------------------------------
 class WindowAttention(nn.Module):
     def __init__(self, dim, window_size, num_heads, dropout=0.1):
@@ -200,25 +176,37 @@ class WindowAttention(nn.Module):
         return x
 
 class SwinTemporalBlock(nn.Module):
-    def __init__(self, dim, num_heads, window_size=20, shift_size=0, dropout=0.1, bottleneck_ratio=0.5):
+    def __init__(self, dim, num_heads, window_sizes=[10, 20], shift_sizes=[0, 0], dropout=0.1, bottleneck_ratio=0.5):
         super().__init__()
         self.dim = dim
         self.num_heads = num_heads
-        self.window_size = window_size
-        self.shift_size = shift_size
         
-        # Bottleneck: 채널 축소 (128 -> 64)
+        # [Multi-Scale] 서로 다른 Window Size와 Shift Size를 리스트로 받음
+        self.window_sizes = window_sizes
+        self.shift_sizes = shift_sizes
+        
+        # Bottleneck: 채널 축소 (예: 128 -> 64)
         self.dim_inner = int(dim * bottleneck_ratio)
+        
+        # 각 브랜치(헤드 그룹)별 채널 및 헤드 수 (반으로 분할)
+        self.dim_branch = self.dim_inner // 2
+        self.heads_branch = num_heads // 2
         
         # Linear Projection for Bottleneck (Down / Up)
         self.proj_down = nn.Linear(dim, self.dim_inner)
         self.proj_up = nn.Linear(self.dim_inner, dim)
         
-        assert 0 <= self.shift_size < self.window_size
-
         self.norm1 = RMSNorm(self.dim_inner)
-        # Attention은 줄어든 채널(64)에서 수행 (연산량 1/4배)
-        self.attn = WindowAttention(self.dim_inner, window_size, num_heads, dropout)
+        
+        # [Multi-Scale] 두 개의 서로 다른 Window Attention 생성
+        # Branch 1: window_sizes[0] (예: 10)
+        self.attn1 = WindowAttention(
+            self.dim_branch, window_sizes[0], self.heads_branch, dropout
+        )
+        # Branch 2: window_sizes[1] (예: 20)
+        self.attn2 = WindowAttention(
+            self.dim_branch, window_sizes[1], self.heads_branch, dropout
+        )
         
         self.norm2 = RMSNorm(dim)
         self.ffn = nn.Sequential(
@@ -229,56 +217,87 @@ class SwinTemporalBlock(nn.Module):
             nn.Dropout(dropout)
         )
 
+    def _process_branch(self, x, attn_layer, window_size, shift_size):
+        """
+        각 브랜치별로 Padding -> Shift -> Window Partition -> Attention -> Merge -> Reverse Shift 수행
+        """
+        B, T, C = x.shape
+        
+        # 1. Padding
+        pad_t = (window_size - T % window_size) % window_size
+        if pad_t > 0:
+            x = F.pad(x, (0, 0, 0, pad_t))
+        
+        Bp, Tp, Cp = x.shape
+
+        # 2. Cyclic Shift & Mask Generation
+        if shift_size > 0:
+            shifted_x = torch.roll(x, shifts=-shift_size, dims=1)
+            
+            # Mask 생성 (Dynamic T 고려)
+            img_mask = torch.zeros((1, Tp, 1), device=x.device)
+            t_slices = (
+                slice(0, -window_size),
+                slice(-window_size, -shift_size),
+                slice(-shift_size, None)
+            )
+            cnt = 0
+            for s in t_slices:
+                img_mask[:, s, :] = cnt
+                cnt += 1
+            
+            mask_windows = img_mask.reshape(-1, window_size, 1)
+            attn_mask = mask_windows - mask_windows.transpose(1, 2)
+            attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100.0)).masked_fill(attn_mask == 0, float(0.0))
+        else:
+            shifted_x = x
+            attn_mask = None
+
+        # 3. Window Partition
+        x_windows = shifted_x.reshape(Bp, Tp // window_size, window_size, Cp)
+        x_windows = x_windows.reshape(-1, window_size, Cp)
+        
+        # 4. Attention
+        attn_windows = attn_layer(x_windows, mask=attn_mask)
+        
+        # 5. Merge Windows
+        shifted_x = attn_windows.reshape(Bp, Tp, Cp)
+        
+        # 6. Reverse Shift
+        if shift_size > 0:
+            x_out = torch.roll(shifted_x, shifts=shift_size, dims=1)
+        else:
+            x_out = shifted_x
+
+        # 7. Remove Padding
+        if pad_t > 0:
+            x_out = x_out[:, :T, :]
+            
+        return x_out
+
     def forward(self, x):
         # x: (N*V, T, D)
-        B, T, C = x.shape
         residual = x
         
         # --- 1. Bottleneck Down ---
         # (B, T, 128) -> (B, T, 64)
         x_inner = self.proj_down(x)
-        
         x_inner = self.norm1(x_inner)
 
-        # Padding
-        pad_t = (self.window_size - T % self.window_size) % self.window_size
-        if pad_t > 0:
-            x_inner = F.pad(x_inner, (0, 0, 0, pad_t))
+        # --- 2. Channel Split & Multi-Scale Processing ---
+        # 채널을 반으로 나눔 (예: 64 -> 32, 32)
+        x1, x2 = torch.split(x_inner, self.dim_branch, dim=-1)
         
-        Bp, Tp, Cp = x_inner.shape 
+        # Branch 1 (Window Size 1)
+        out1 = self._process_branch(x1, self.attn1, self.window_sizes[0], self.shift_sizes[0])
+        
+        # Branch 2 (Window Size 2)
+        out2 = self._process_branch(x2, self.attn2, self.window_sizes[1], self.shift_sizes[1])
+        
+        # --- 3. Concatenation ---
+        x_inner = torch.cat([out1, out2], dim=-1)
 
-        # Cyclic Shift
-        if self.shift_size > 0:
-            shifted_x = torch.roll(x_inner, shifts=-self.shift_size, dims=1)
-            img_mask = torch.zeros((1, Tp, 1), device=x.device)
-            t_slices = (slice(0, -self.window_size), slice(-self.window_size, -self.shift_size), slice(-self.shift_size, None))
-            cnt = 0
-            for s in t_slices:
-                img_mask[:, s, :] = cnt
-                cnt += 1
-            mask_windows = img_mask.reshape(-1, self.window_size, 1)
-            attn_mask = mask_windows - mask_windows.transpose(1, 2)
-            attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100.0)).masked_fill(attn_mask == 0, float(0.0))
-        else:
-            shifted_x = x_inner
-            attn_mask = None
-
-        # Partition & Attention
-        x_windows = shifted_x.reshape(Bp, Tp // self.window_size, self.window_size, Cp)
-        x_windows = x_windows.reshape(-1, self.window_size, Cp)
-        attn_windows = self.attn(x_windows, mask=attn_mask)
-
-        # Merge & Reverse Shift
-        shifted_x = attn_windows.reshape(Bp, Tp, Cp)
-        if self.shift_size > 0:
-            x_inner = torch.roll(shifted_x, shifts=self.shift_size, dims=1)
-        else:
-            x_inner = shifted_x
-
-        if pad_t > 0:
-            x_inner = x_inner[:, :T, :]
-
-        # --- 2. Bottleneck Up ---
+        # --- 4. Bottleneck Up ---
         # (B, T, 64) -> (B, T, 128)
         x = self.proj_up(x_inner)
 
@@ -306,17 +325,16 @@ class AttentivePooling(nn.Module):
         return x_pooled
 
 # --------------------------------------------------------------------------
-# Main Model: ST_GRL_Model (GRL Applied)
+# Main Model: ST_Model (GRL Removed)
 # --------------------------------------------------------------------------
-class ST_GRL_Model(nn.Module):
+class ST_Model(nn.Module):
     def __init__(self, 
                  num_joints=config.NUM_JOINTS, 
                  num_coords=config.NUM_COORDS, 
                  num_classes=config.NUM_CLASSES, 
                  hidden_dim=128,
-                 window_size=config.WINDOW_SIZE,
+                 window_size=config.WINDOW_SIZE, # 기본 10
                  dropout=config.DROPOUT,
-                 num_aux_classes=0,
                  **kwargs):
         
         super().__init__()
@@ -324,20 +342,38 @@ class ST_GRL_Model(nn.Module):
             num_coords, hidden_dim, num_joints, config.MAX_FRAMES, dropout
         )
         
+        # Multi-Scale Window 설정
+        # 기본 윈도우(10)와 2배 크기 윈도우(20)를 동시에 사용
+        ws_small = window_size
+        ws_large = window_size * 2
+        window_sizes = [ws_small, ws_large]
+        
+        # Shift Size 설정 (각 윈도우의 절반)
+        ss_small = ws_small // 2
+        ss_large = ws_large // 2
+
         # --- Stage 1 ---
         self.spatial_1 = SpatialMixerBlock(hidden_dim, num_joints, dropout=dropout)
-        self.temporal_1 = SwinTemporalBlock(hidden_dim, num_heads=4, window_size=window_size, shift_size=0, dropout=dropout, bottleneck_ratio=0.5)
+        # Shift 없음: [0, 0]
+        self.temporal_1 = SwinTemporalBlock(hidden_dim, num_heads=4, window_sizes=window_sizes, shift_sizes=[0, 0], dropout=dropout, bottleneck_ratio=0.5)
         
         # --- Early Downsampling (New) ---
         self.downsample = TemporalDownsample(hidden_dim, kernel_size=3, stride=2, padding=1)
         
         # --- Stage 2 ---
         self.spatial_2 = SpatialMixerBlock(hidden_dim, num_joints, dropout=dropout)
-        self.temporal_2 = SwinTemporalBlock(hidden_dim, num_heads=4, window_size=window_size, shift_size=window_size//2, dropout=dropout, bottleneck_ratio=0.5)
+        # Shift 적용: [5, 10]
+        self.temporal_2 = SwinTemporalBlock(hidden_dim, num_heads=4, window_sizes=window_sizes, shift_sizes=[ss_small, ss_large], dropout=dropout, bottleneck_ratio=0.5)
         
         # --- Stage 3 ---
         self.spatial_3 = SpatialMixerBlock(hidden_dim, num_joints, dropout=dropout)
-        self.temporal_3 = SwinTemporalBlock(hidden_dim, num_heads=4, window_size=window_size, shift_size=0, dropout=dropout, bottleneck_ratio=0.5)
+        # Shift 없음: [0, 0]
+        self.temporal_3 = SwinTemporalBlock(hidden_dim, num_heads=4, window_sizes=window_sizes, shift_sizes=[0, 0], dropout=dropout, bottleneck_ratio=0.5)
+
+        # --- Stage 4 ---
+        self.spatial_4 = SpatialMixerBlock(hidden_dim, num_joints, dropout=dropout)
+        # Shift 적용: [5, 10]
+        self.temporal_4 = SwinTemporalBlock(hidden_dim, num_heads=4, window_sizes=window_sizes, shift_sizes=[ss_small, ss_large], dropout=dropout, bottleneck_ratio=0.5)
 
         self.attentive_pooling = AttentivePooling(hidden_dim, num_classes)
 
@@ -347,14 +383,7 @@ class ST_GRL_Model(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, num_classes)
         )
-        
-        # 2. Domain (Auxiliary) Classifier & GRL
-        self.grad_reversal = GradientReversalLayer(alpha=1.0) # alpha는 학습 중 조정
-        self.aux_classifier = nn.Sequential(
-            RMSNorm(hidden_dim),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, num_aux_classes)
-        )
+        # GRL and Aux Classifier Removed
 
     def forward(self, x):
         # x: (N, C, T, V)
@@ -388,6 +417,11 @@ class ST_GRL_Model(nn.Module):
         x = self.spatial_3(x)
         x_temporal = x.permute(0, 2, 1, 3).contiguous().reshape(N * V, current_T, -1)
         x_temporal = self.temporal_3(x_temporal)
+
+        # --- Layer 4 ---
+        x = self.spatial_4(x)
+        x_temporal = x.permute(0, 2, 1, 3).contiguous().reshape(N * V, current_T, -1)
+        x_temporal = self.temporal_4(x_temporal)
         
         # Final Feature Aggregation
         final_features = x_temporal.reshape(N, V, current_T, -1)
@@ -399,10 +433,5 @@ class ST_GRL_Model(nn.Module):
         # --- Branch 1: Main Task (Action Recognition) ---
         action_logits = self.action_head(pooled_features)
         
-        # --- Branch 2: Auxiliary Task (Domain Classification with GRL) ---
-        # GRL 적용 (Forward: Identity, Backward: Negative Gradient)
-        reversed_features = self.grad_reversal(pooled_features)
-        aux_logits = self.aux_classifier(reversed_features)
-        
-        # 두 개의 Logit을 모두 반환
-        return action_logits, aux_logits
+        # Return only action logits
+        return action_logits

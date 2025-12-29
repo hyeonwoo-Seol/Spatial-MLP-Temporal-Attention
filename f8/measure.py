@@ -2,35 +2,40 @@ import torch
 import time
 import numpy as np
 from ptflops import get_model_complexity_info
-from model import ST_GRL_Model  # 변경: 현재 모델 import
 import config
+from model import ST_Model  # [수정] ST_GRL_Model -> ST_Model 변경
 
 def input_constructor(input_res):
     """
     ptflops가 모델에 입력을 넣을 때 사용하는 생성자 함수입니다.
-    ST_GRL_Model은 단일 입력 (N, C, T, V)를 받습니다.
+    ST_Model은 단일 입력 (N, C, T, V)를 받습니다.
     """
     batch_size = 1
     # config에 정의된 차원 사용
-    # 입력 형태: (Batch, Channels, Frames, Joints)
     input_shape = (batch_size, config.NUM_COORDS, config.MAX_FRAMES, config.NUM_JOINTS)
     
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
+    device = config.DEVICE
     dummy_input = torch.randn(input_shape).to(device)
     
-    # 모델의 forward(*args)에 들어갈 인자들을 튜플 또는 딕셔너리로 반환
-    # forward(self, x)
+    # 모델의 forward(*args)에 들어갈 인자들을 딕셔너리로 반환
     return {"x": dummy_input}
 
 def measure_efficiency():
     # 1. 모델 준비
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = config.DEVICE
     print(f"Using device: {device}")
 
-    # ST_GRL_Model 인스턴스화 (기본 config 값 사용)
-    # num_aux_classes는 측정 시 중요하지 않으므로 기본값(0) 또는 임의값 사용
-    model = ST_GRL_Model().to(device)
+    # [수정] ST_Model 인스턴스화 (GRL 제거로 num_aux_classes 불필요)
+    # config의 기본값을 사용하므로 인자 없이 호출하거나 필요한 경우 명시할 수 있습니다.
+    model = ST_Model(
+        num_joints=config.NUM_JOINTS,
+        num_coords=config.NUM_COORDS,
+        num_classes=config.NUM_CLASSES,
+        hidden_dim=config.HIDDEN_DIM,
+        window_size=config.WINDOW_SIZE,
+        dropout=config.DROPOUT
+    ).to(device)
+    
     model.eval()
 
     # ----------------------------------------------------------------------
@@ -41,24 +46,25 @@ def measure_efficiency():
     try:
         macs, params = get_model_complexity_info(
             model, 
-            (config.NUM_COORDS, config.MAX_FRAMES, config.NUM_JOINTS), # input_res (사용되지 않으나 형식상 전달)
+            (config.NUM_COORDS, config.MAX_FRAMES, config.NUM_JOINTS), 
             as_strings=False, 
             print_per_layer_stat=False, 
             verbose=False,
             input_constructor=input_constructor
         )
         
-        # 일반적으로 1 MAC = 2 FLOPs로 계산
+        # 1 MAC = 2 FLOPs
         flops = macs * 2
 
         print(f" - Parameters : {params / 1e6:.2f} M")
         print(f" - MACs       : {macs / 1e9:.2f} G")
-        print(f" - FLOPs      : {flops / 1e9:.2f} G (Calculated as MACs * 2)")
+        print(f" - FLOPs      : {flops / 1e9:.2f} G")
         
     except Exception as e:
+        # 모델 구조 호환성 문제 등으로 인한 런타임 에러 시 처리
         print(f"Error measuring FLOPs: {e}")
         print("Skipping FLOPs measurement...")
-        params = sum(p.numel() for p in model.parameters()) # Fallback for params
+        params = sum(p.numel() for p in model.parameters()) 
         flops = 0.0
 
     # ----------------------------------------------------------------------
@@ -66,10 +72,9 @@ def measure_efficiency():
     # ----------------------------------------------------------------------
     print("\n[2] Measuring Latency & FPS...")
     
-    # 더미 입력 생성 (Batch Size = 1)
     dummy_input = torch.randn(1, config.NUM_COORDS, config.MAX_FRAMES, config.NUM_JOINTS).to(device)
 
-    # GPU Warm-up (초기 오버헤드 제거)
+    # GPU Warm-up
     warmup_iters = 50
     with torch.no_grad():
         for _ in range(warmup_iters):
@@ -92,7 +97,7 @@ def measure_efficiency():
     end_time = time.time()
     
     total_time = end_time - start_time
-    avg_latency = total_time / test_iters # 초 단위
+    avg_latency = total_time / test_iters 
     fps = 1.0 / avg_latency
 
     print(f" - Batch Size : 1")
