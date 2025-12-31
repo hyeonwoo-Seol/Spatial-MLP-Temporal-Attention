@@ -352,13 +352,14 @@ class ST_Model(nn.Module):
         ss_small = ws_small // 2
         ss_large = ws_large // 2
 
+        # --- Downsampling ---
+        self.downsample1 = TemporalDownsample(hidden_dim, kernel_size=3, stride=2, padding=1)
+        self.downsample2 = TemporalDownsample(hidden_dim, kernel_size=3, stride=2, padding=1)
+
         # --- Stage 1 ---
         self.spatial_1 = SpatialMixerBlock(hidden_dim, num_joints, dropout=dropout)
         # Shift 없음: [0, 0]
         self.temporal_1 = SwinTemporalBlock(hidden_dim, num_heads=4, window_sizes=window_sizes, shift_sizes=[0, 0], dropout=dropout, bottleneck_ratio=0.5)
-        
-        # --- Early Downsampling (New) ---
-        self.downsample = TemporalDownsample(hidden_dim, kernel_size=3, stride=2, padding=1)
         
         # --- Stage 2 ---
         self.spatial_2 = SpatialMixerBlock(hidden_dim, num_joints, dropout=dropout)
@@ -383,40 +384,49 @@ class ST_Model(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, num_classes)
         )
-        # GRL and Aux Classifier Removed
 
     def forward(self, x):
         # x: (N, C, T, V)
         N, C, T, V = x.shape
         x = self.embedding(x)
+
+        # --- DownSample 1 ---
+        x_flat = x.permute(0, 2, 1, 3).contiguous().reshape(N * V, T, -1)
+        x_flat = self.downsample1(x_flat) # (N*V, 64, D)
+
+        # Get new T and reshape back
+        _, current_T, _ = x_flat.shape
+        x = x_flat.reshape(N, V, current_T, -1).permute(0, 2, 1, 3) # (N, 64, V, D)
         
         # --- Layer 1 ---
         x = self.spatial_1(x) 
         # Transform for Temporal: (N*V, T, D)
-        x_temporal = x.permute(0, 2, 1, 3).contiguous().reshape(N * V, T, -1)
+        x_temporal = x.permute(0, 2, 1, 3).contiguous().reshape(N * V, current_T, -1)
         x_temporal = self.temporal_1(x_temporal)
-        
-        # --- Downsampling ---
-        x_temporal = self.downsample(x_temporal) # (N*V, T/2, D)
-        
-        # Get new T (Dynamic Shape)
-        # x_temporal is (Batch_Size, Time, Channels)
-        _, current_T, _ = x_temporal.shape
-        
-        # Reshape back to Spatial: (N, T', V, D)
         x = x_temporal.reshape(N, V, current_T, -1).permute(0, 2, 1, 3)
 
+
+        # --- Downsample 2 ---
+        x_flat = x.permute(0, 2, 1, 3).contiguous().reshape(N * V, current_T, -1)
+        x_flat = self.downsample2(x_flat) # (N*V, 32, D)
+
+        # Get new T and reshape back
+        _, current_T, _ = x_flat.shape
+        x = x_flat.reshape(N, V, current_T, -1).permute(0, 2, 1, 3) # (N, 32, V, D
+
+        
         # --- Layer 2 ---
         x = self.spatial_2(x)
-        # Use current_T for reshape
         x_temporal = x.permute(0, 2, 1, 3).contiguous().reshape(N * V, current_T, -1)
         x_temporal = self.temporal_2(x_temporal)
         x = x_temporal.reshape(N, V, current_T, -1).permute(0, 2, 1, 3)
 
+                
         # --- Layer 3 ---
         x = self.spatial_3(x)
         x_temporal = x.permute(0, 2, 1, 3).contiguous().reshape(N * V, current_T, -1)
         x_temporal = self.temporal_3(x_temporal)
+        x = x_temporal.reshape(N, V, current_T, -1).permute(0, 2, 1, 3)
 
         # --- Layer 4 ---
         x = self.spatial_4(x)
