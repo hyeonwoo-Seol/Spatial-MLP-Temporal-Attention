@@ -13,10 +13,10 @@ import os
 class TrainArgs:
     def __init__(self, trial, base_args):
         # >> 1. 탐색할 하이퍼파라미터 범위를 설정한다 (Trial 객체 사용).
-        self.lr = trial.suggest_float("lr", 1e-4, 1e-3, log=True)
-        self.dropout = trial.suggest_float("dropout", 0.1, 0.5)
+        self.lr = trial.suggest_float("lr", 4e-4, 9e-4, log=False)
+        self.dropout = trial.suggest_float("dropout", 0.1, 0.4)
         self.prob = trial.suggest_float("prob", 0.3, 0.8) 
-        self.weight_decay = trial.suggest_float("weight_decay", 1e-4, 1e-3, log=True)
+        self.weight_decay = trial.suggest_float("weight_decay", 1e-4, 1e-3, log=False)
         self.smoothing = trial.suggest_float("smoothing", 0.0, 0.2)
         
         # >> 2. 고정 파라미터는 커맨드라인에서 받은 값을 유지한다.
