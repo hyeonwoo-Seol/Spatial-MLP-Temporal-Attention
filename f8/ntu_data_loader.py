@@ -1,10 +1,13 @@
+# >> ntu_data_loader.py
+
+
 import os
 import numpy as np
 import torch
 from torch.utils.data import Dataset
 import config
 
-# Protocol Definitions
+# >> Protocol Definitions
 TRAINING_SUBJECTS = [1, 2, 4, 5, 8, 9, 13, 14, 15, 16, 17, 18, 19, 25, 27, 28, 31, 34, 35, 38]
 TRAINING_CAMERAS = [2, 3]
 
@@ -20,7 +23,7 @@ class NTURGBDDataset(Dataset):
         self.samples = []
         self._load_data_path()
 
-        # 통계치 로드
+        # >> 데이터 정규화를 위한 평균과 표준편차를 로드한다.
         base_dir = os.path.dirname(data_path.rstrip('/'))
         
         if self.protocol == 'xsub':
@@ -43,6 +46,7 @@ class NTURGBDDataset(Dataset):
             self.std = torch.ones(config.NUM_COORDS)
 
     def _load_data_path(self):
+        # >> 데이터 경로가 존재하는지 확인한다.
         if not os.path.exists(self.data_path):
             print(f"Error: Data path {self.data_path} does not exist.")
             return
@@ -57,6 +61,7 @@ class NTURGBDDataset(Dataset):
             except ValueError:
                 continue
             
+            # >> 프로토콜(X-Sub, X-View)에 따라 학습 샘플 여부를 결정한다.
             if self.protocol == 'xsub':
                 is_train_sample = sid in self.training_subjects
             elif self.protocol == 'xview':
@@ -64,6 +69,7 @@ class NTURGBDDataset(Dataset):
             else:
                 raise ValueError(f"Unknown protocol: {self.protocol}")
             
+            # >> Split(train/val)에 맞는 파일만 리스트에 추가한다.
             if self.split == 'train':
                 if is_train_sample:
                     self.samples.append(os.path.join(self.data_path, filename))
@@ -75,12 +81,12 @@ class NTURGBDDataset(Dataset):
         return len(self.samples)
 
     def _get_augmented_view(self, features):
-        # [Augmentation Strategy]
-        # Temporal Dimension은 이미 max_frames로 압축되었으므로 Temporal Crop은 수행하지 않습니다.
+        # >> 학습 시 데이터 증강을 적용한다.
+        # >> 시간 차원은 이미 압축되었으므로 Temporal Crop은 생략한다.
         feat = features.clone()
         T = feat.shape[0]
 
-        # 1. Random Rotation (3D Y-axis)
+        # >> 1. Random Rotation (Y축 회전)을 적용한다.
         if np.random.rand() < config.PROB:
             angle = np.random.uniform(-15, 15) * np.pi / 180.0
             c, s = np.cos(angle), np.sin(angle)
@@ -90,12 +96,12 @@ class NTURGBDDataset(Dataset):
             rotated = torch.matmul(reshaped, rot_mat.T)
             feat = rotated.view(T, config.NUM_JOINTS, 12)
 
-        # 2. Random Scaling
+        # >> 2. Random Scaling을 적용하여 크기를 조절한다.
         if np.random.rand() < config.PROB:
             scale = np.random.uniform(0.9, 1.1)
             feat *= scale
             
-        # 3. Time Masking (일부 구간 0으로)
+        # >> 3. Time Masking을 통해 일부 구간을 0으로 만든다.
         if np.random.rand() < config.PROB:
             mask_len = np.random.randint(5, 15)
             if T > mask_len:
@@ -110,10 +116,11 @@ class NTURGBDDataset(Dataset):
         
         data = torch.load(data_path)
         
-        # 전처리된 데이터는 이미 (config.MAX_FRAMES, V, C) 형태입니다.
+        # >> 전처리된 데이터(config.MAX_FRAMES, V, C)와 라벨을 로드한다.
         features = data['data'] 
         action_label = data['label']
         
+        # >> 보조 라벨(Subject ID 또는 Camera ID)을 설정한다.
         if self.protocol == 'xsub':
             sid = int(filename[9:12])
             aux_label = sid - 1 
@@ -123,14 +130,14 @@ class NTURGBDDataset(Dataset):
         else:
             aux_label = 0 
 
-        # Train 시에만 Augmentation 적용
+        # >> 학습 모드일 경우에만 데이터 증강을 수행한다.
         if self.split == 'train':
             features = self._get_augmented_view(features)
         
-        # Normalization
+        # >> 로드한 통계치로 정규화를 수행한다.
         features = (features - self.mean) / (self.std + 1e-8)
 
-        # (T, V, C) -> (C, T, V)
+        # >> 모델 입력 형태에 맞춰 차원을 변환한다: (T, V, C) -> (C, T, V)
         features = features.permute(2, 0, 1) 
 
         return features, action_label, aux_label

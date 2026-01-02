@@ -1,4 +1,5 @@
-# preprocess_ntu_data.py
+# >> preprocess_ntu_data.py
+
 # ##--------------------------------------------------------------------------
 # 1. 12차원 입력 (All Vectors)
 #    - Group A: Normalized Bone Vector (3)
@@ -8,11 +9,7 @@
 # 2. 척추 길이 정규화 (Normalization) 복구
 # 3. log1p 제거 (물리적 선형성 유지)
 # ##----------------------------------------------------------------------------
-# [수정 사항 2025-12-07] (Critical Bug Fix)
-# - resize_data_skateformer_style 함수 내 차원 축소 오류 수정.
-# - np.sum(..., axis=0)을 제거하고 axis=(1,2,3)만 합산하여 Time 축 보존.
-# - Multiprocessing 안전성 강화를 위한 예외 처리 추가.
-# ##----------------------------------------------------------------------------
+
 
 import os
 import numpy as np
@@ -23,11 +20,11 @@ import config
 from multiprocessing import Pool, cpu_count
 import traceback
 
-
+# >> 데이터 파일 경로를 설정한다.
 SOURCE_DATA_PATH = '../../paper-review/Action_Recognition/Code/nturgbd01/' 
 TARGET_DATA_PATH = '../nturgbd_processed_12D_Norm_SKF/' 
 
-# 통계 파일 경로 분리
+# >> 통계 파일 경로를 분리하여 설정한다.
 STATS_FILE_XSUB = '../stats_xsub_SKF.npz'
 STATS_FILE_XVIEW = '../stats_xview_SKF.npz'
 
@@ -35,11 +32,11 @@ MAX_FRAMES = config.MAX_FRAMES
 NUM_JOINTS = config.NUM_JOINTS
 BASE_NUM_JOINTS = 25
 
-# Protocol Definitions
+# >> 학습에 사용할 Subject와 Camera 정보를 정의한다.
 TRAINING_SUBJECTS = [1, 2, 4, 5, 8, 9, 13, 14, 15, 16, 17, 18, 19, 25, 27, 28, 31, 34, 35, 38]
 TRAINING_CAMERAS = [2, 3] 
 
-# 뼈 연결 정보
+# >> 관절 간의 연결(Bone) 정보를 정의한다.
 SKELETON_BONES = [
     (20, 1), (1, 0), (20, 2), (2, 3),
     (20, 4), (4, 5), (5, 6), (6, 7), (7, 21), (7, 22),
@@ -48,8 +45,8 @@ SKELETON_BONES = [
     (0, 16), (16, 17), (17, 18), (18, 19)
 ]
 
+# >> 스켈레톤 파일을 읽어 좌표 데이터를 추출한다.
 def _read_skeleton_file(filepath):
-    """기존과 동일한 스켈레톤 파일 읽기 함수"""
     try:
         with open(filepath, 'r') as f:
             first_line = f.readline()
@@ -61,7 +58,7 @@ def _read_skeleton_file(filepath):
     if num_frames == 0:
         return np.zeros((0, 2, BASE_NUM_JOINTS, 3))
 
-    # 1차 스캔: Actor 찾기
+    # >> 1차 스캔: 등장 빈도가 높은 상위 2명의 Actor를 찾는다.
     body_id_counts = {}
     try:
         with open(filepath, 'r') as f:
@@ -92,7 +89,7 @@ def _read_skeleton_file(filepath):
     sorted_ids = sorted(body_id_counts.items(), key=lambda x: x[1], reverse=True)
     targets = [x[0] for x in sorted_ids[:2]]
     
-    # 2차 스캔: 좌표 추출
+    # >> 2차 스캔: 선별된 Actor의 관절 좌표를 추출한다.
     final_coords = np.zeros((num_frames, 2, BASE_NUM_JOINTS, 3))
     try:
         with open(filepath, 'r') as f:
@@ -125,76 +122,84 @@ def _read_skeleton_file(filepath):
         
     return final_coords
 
+# >> 전체 데이터에서 움직임이 있는 유효 구간을 찾아 MAX_FRAMES로 선형 보간한다.
+# >> INPUT: (T, M, V, C) 넘파이 배열
+# >> OUTPUT: (config.MAX_FRAMES, M, V, C) 넘파이 배열
 def resize_data_skateformer_style(data_numpy, target_frames=MAX_FRAMES):
-    """
-    [SkateFormer Strategy Implementation]
-    1. 전체 데이터에서 움직임이 있는(0이 아닌) 유효 구간(Valid Interval)을 찾습니다.
-    2. 해당 구간을 Target Frames(config.MAX_FRAMES) 길이로 선형 보간(Resize)합니다.
-    Input: (T, M, V, C) numpy array
-    Output: (target_frames, M, V, C) numpy array
-    """
     T, M, V, C = data_numpy.shape
     
+    # >> 움직임이 있는(0이 아닌) 프레임을 식별한다.
     valid_mask = np.sum(np.abs(data_numpy), axis=(1, 2, 3)) != 0
-    
     valid_indices = np.where(valid_mask)[0]
     
     if len(valid_indices) == 0:
         return np.zeros((target_frames, M, V, C))
     
-    # 유효 구간의 시작과 끝
+    # >> 유효 구간의 시작과 끝 인덱스를 설정한다.
     begin = valid_indices[0]
     end = valid_indices[-1] + 1
     
-    # 유효 구간 Crop (자르기)
+    # >> 유효 구간만 잘라낸다(Crop).
     valid_data = data_numpy[begin:end] # Shape: (Real_T, M, V, C)
     
-    # 2. Resize (Linear Interpolation)
-    # PyTorch interpolate 사용을 위해 차원 변환: (Batch, Channel, Length)
-    # 여기서는 Batch=1, Channel=All Features(M*V*C), Length=Time
+    # >> PyTorch의 interpolate 함수 사용을 위해 차원을 변환한다.
+    # >> (Real_T, M, V, C) -> (1, M*V*C, Real_T)
     data_torch = torch.from_numpy(valid_data).float()
-    
-    # (Real_T, M, V, C) -> (1, M, V, C, Real_T) 아님. Permute 주의.
-    # permute(1, 2, 3, 0) -> (M, V, C, Real_T)
-    # view(1, -1, Real_T) -> (1, M*V*C, Real_T) == (Batch, Channel, Length)
     data_torch = data_torch.permute(1, 2, 3, 0).contiguous().view(1, M * V * C, -1)
     
-    # 보간 수행
+    # >> 선형 보간(Linear Interpolation)을 수행하여 프레임 수를 맞춘다.
     data_resized = F.interpolate(data_torch, size=target_frames, mode='linear', align_corners=False)
     
-    # 원래 차원으로 복구: (1, M*V*C, Target_T) -> (Target_T, M, V, C)
+    # >> 원래 차원으로 복구한다. (Target_T, M, V, C)
     data_resized = data_resized.view(M, V, C, target_frames).permute(3, 0, 1, 2).contiguous()
     
     return data_resized.numpy()
 
+# >> 12차원 특징 벡터를 계산하고 정규화를 수행한다.
 def _calculate_features(coords):
-    """12차원 벡터 특징 계산 함수"""
     T = coords.shape[0]
     if T == 0:
         return np.zeros((0, NUM_JOINTS, config.NUM_COORDS))
 
-    # 1. 척추 길이 계산
+    # >> 1. 척추 벡터와 길이를 계산한다.
     spine_vec = coords[:, :, 20, :] - coords[:, :, 0, :]
     spine_len = np.linalg.norm(spine_vec, axis=-1, keepdims=True)
     
+    # >> 척추 길이가 감지되지 않은 프레임(Noise)을 선형 보간으로 복구한다.
+    for m in range(spine_len.shape[1]): # 각 사람에 대해 반복
+        sl = spine_len[:, m, 0]
+        invalid_idx = sl <= 0.01 # 척추 길이가 0에 가까운 프레임 식별
+        valid_idx = ~invalid_idx
+        
+        # >> 유효한 프레임과 무효한 프레임이 공존할 경우 보간을 수행한다.
+        if valid_idx.any() and invalid_idx.any():
+            x_valid = np.where(valid_idx)[0]
+            y_valid = sl[valid_idx]
+            x_invalid = np.where(invalid_idx)[0]
+            
+            # >> 결측치(invalid)를 유효값(valid) 기반으로 채운다.
+            sl[x_invalid] = np.interp(x_invalid, x_valid, y_valid)
+            spine_len[:, m, 0] = sl
+
     valid_mask = (spine_len > 0.01).astype(np.float32)
+    
+    # >> 0으로 나누는 것을 방지하기 위해 엡실론을 더한다.
     safe_spine_len = spine_len + 1e-8
     safe_spine_len = safe_spine_len[..., np.newaxis] 
 
-    # A. Bone Vector
+    # >> A. 척추 길이를 기준으로 정규화된 Bone Vector를 계산한다.
     bone_features = np.zeros((T, 2, BASE_NUM_JOINTS, 3))
     for parent, child in SKELETON_BONES:
         vec = coords[:, :, child, :] - coords[:, :, parent, :]
         bone_features[:, :, child, :] = vec
     bone_features = bone_features / safe_spine_len
 
-    # B. Velocity Vector
-    # Resize된 좌표 상에서의 속도이므로 시간 간격이 정규화된 상태의 변화량입니다.
+    # >> B. 척추 길이를 기준으로 정규화된 Velocity Vector를 계산한다.
     velocity = np.zeros_like(coords)
     velocity[1:] = coords[1:] - coords[:-1]
     velocity_features = velocity / safe_spine_len
 
-    # C. Relative Center
+    # >> C. 두 사람 간의 상대적 중심 위치(Relative Center)를 계산한다.
     p0_center = coords[:, 0, 0, :] 
     p1_center = coords[:, 1, 0, :] 
     
@@ -208,7 +213,7 @@ def _calculate_features(coords):
     rc_feat_p1 = np.broadcast_to(rel_center_1to0, (T, BASE_NUM_JOINTS, 3))
     rel_center_features = np.stack([rc_feat_p0, rc_feat_p1], axis=1)
 
-    # D. Relative To Other
+    # >> D. 상대방 중심에 대한 나의 관절 위치(Relative To Other)를 계산한다.
     rel_other_p0 = (coords[:, 0, :, :] - p1_center[:, np.newaxis, :])
     rel_other_p1 = (coords[:, 1, :, :] - p0_center[:, np.newaxis, :])
     
@@ -216,7 +221,7 @@ def _calculate_features(coords):
     rel_other_p1 = rel_other_p1 / safe_spine_len[:, 1, :, :]
     rel_other_features = np.stack([rel_other_p0, rel_other_p1], axis=1)
 
-    # Concatenation
+    # >> 4가지 특징 그룹을 연결(Concatenate)한다.
     final_features_per_person = np.concatenate([
         bone_features,
         velocity_features,
@@ -224,6 +229,7 @@ def _calculate_features(coords):
         rel_other_features
     ], axis=-1)
 
+    # >> 유효하지 않은 데이터는 마스킹 처리한다.
     final_features_per_person *= valid_mask[..., np.newaxis]
 
     person1 = final_features_per_person[:, 0, :, :]
@@ -231,6 +237,7 @@ def _calculate_features(coords):
     
     return np.concatenate((person1, person2), axis=1)
 
+# >> 통계 계산을 위해 개별 파일을 처리한다.
 def process_file_for_stats(filename):
     if not filename.endswith('.skeleton'): return None
     
@@ -247,10 +254,11 @@ def process_file_for_stats(filename):
         coords = _read_skeleton_file(path)
         if coords.shape[0] == 0: return None
         
-        # [Corrected Logic] 전체 좌표를 넘겨서 Resize 수행 (config.MAX_FRAMES)
+        # >> Resize를 수행한 후 특징을 추출한다.
         resized_coords = resize_data_skateformer_style(coords, target_frames=MAX_FRAMES)
         features = _calculate_features(resized_coords)
         
+        # >> 통계 계산을 위해 유효한 데이터만 필터링한다.
         features_flat = features.reshape(-1, config.NUM_COORDS)
         mask = np.abs(features_flat).sum(axis=1) > 1e-6
         valid_data = features_flat[mask]
@@ -262,6 +270,7 @@ def process_file_for_stats(filename):
         print(f"Error processing {filename}: {e}")
         return None
 
+# >> 전체 데이터셋에 대한 평균과 표준편차를 계산하고 저장한다.
 def calculate_and_save_stats():
     print("--- Calculating Stats for 12D Features (Separate for X-Sub / X-View) ---")
     filenames = os.listdir(SOURCE_DATA_PATH)
@@ -271,6 +280,7 @@ def calculate_and_save_stats():
     
     num_cores = cpu_count() - 1 if cpu_count() > 1 else 1
     
+    # >> 멀티프로세싱을 사용하여 병렬로 통계를 집계한다.
     with Pool(num_cores) as pool:
         for res in tqdm(pool.imap_unordered(process_file_for_stats, filenames), total=len(filenames)):
             if res:
@@ -280,16 +290,19 @@ def calculate_and_save_stats():
                 if is_xview:
                     cnt_view += c; sum_view += s; ss_view += ss
 
+    # >> X-Sub 프로토콜에 대한 통계를 계산하고 저장한다.
     mean_sub = sum_sub / (cnt_sub + 1e-8)
     std_sub = np.sqrt(np.maximum((ss_sub / (cnt_sub + 1e-8)) - mean_sub**2, 0)) + 1e-8
     np.savez(STATS_FILE_XSUB, mean=mean_sub, std=std_sub)
     print(f"X-Sub Stats saved: {STATS_FILE_XSUB}")
 
+    # >> X-View 프로토콜에 대한 통계를 계산하고 저장한다.
     mean_view = sum_view / (cnt_view + 1e-8)
     std_view = np.sqrt(np.maximum((ss_view / (cnt_view + 1e-8)) - mean_view**2, 0)) + 1e-8
     np.savez(STATS_FILE_XVIEW, mean=mean_view, std=std_view)
     print(f"X-View Stats saved: {STATS_FILE_XVIEW}")
 
+# >> 개별 파일을 전처리하고 .pt 형식으로 저장한다.
 def process_and_save_file(filename):
     if not filename.endswith('.skeleton'): return
     
@@ -301,10 +314,10 @@ def process_and_save_file(filename):
         if coords.shape[0] == 0:
             feat = np.zeros((MAX_FRAMES, NUM_JOINTS, config.NUM_COORDS))
         else:
-            # [Corrected Logic] config.MAX_FRAMES에 맞춰 전체 시퀀스 Resize
+            # >> 전체 시퀀스를 MAX_FRAMES 길이로 Resize한다.
             resized_coords = resize_data_skateformer_style(coords, target_frames=MAX_FRAMES)
             
-            # Resize된 좌표로 특징 계산
+            # >> Resize된 좌표를 기반으로 특징을 계산한다.
             feat = _calculate_features(resized_coords) 
 
         torch.save({
@@ -312,14 +325,16 @@ def process_and_save_file(filename):
             'label': label
         }, os.path.join(TARGET_DATA_PATH, filename.replace('.skeleton', '.pt')))
     except Exception as e:
-        # 하나가 실패해도 멈추지 않고 로그만 남김
+        # >> 에러 발생 시 로그를 출력하고 처리를 계속한다.
         print(f"Error saving {filename}: {e}")
         # traceback.print_exc() # 상세 에러 필요시 주석 해제
 
+# >> 메인 실행 함수이다.
 def main():
     if not os.path.exists(TARGET_DATA_PATH):
         os.makedirs(TARGET_DATA_PATH)
         
+    # >> 통계 파일이 없으면 새로 계산한다.
     if not os.path.exists(STATS_FILE_XSUB) or not os.path.exists(STATS_FILE_XVIEW):
         calculate_and_save_stats()
         
@@ -327,6 +342,7 @@ def main():
     filenames = os.listdir(SOURCE_DATA_PATH)
     num_cores = cpu_count() - 1 if cpu_count() > 1 else 1
     
+    # >> 멀티프로세싱을 사용하여 전체 파일을 병렬로 처리한다.
     with Pool(num_cores) as pool:
         list(tqdm(pool.imap_unordered(process_and_save_file, filenames), total=len(filenames)))
 

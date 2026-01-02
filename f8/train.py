@@ -1,3 +1,5 @@
+# >> train.py
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -11,18 +13,19 @@ import sys
 import argparse
 import time
 
-# [수정] Matplotlib Backend 설정 (Pyplot 임포트 전에 설정 필수)
+# >> Matplotlib 백엔드를 설정한다 (Pyplot 임포트 전 필수).
 import matplotlib
 matplotlib.use('Agg') 
 import matplotlib.pyplot as plt
 
 import config
 
-# 모듈 import
+# >> 필요한 모듈을 임포트한다.
 from ntu_data_loader import NTURGBDDataset
-from model import ST_Model  # [수정] 변경된 모델 클래스 import
+from model import ST_Model
 from utils import calculate_accuracy, save_checkpoint, load_checkpoint
 
+# >> 재현성을 위해 난수 시드를 고정한다.
 def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
@@ -33,18 +36,20 @@ def set_seed(seed):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
+# >> Warmup과 Cosine Annealing을 결합한 학습률 스케줄러를 반환한다.
 def get_scheduler(optimizer, total_epochs, warmup_epochs):
     print(f"Using 'Warmup + Cosine Annealing' scheduler.")
     
-    # 1. Warmup Scheduler
+    # >> 1. 초기 학습률을 서서히 증가시키는 Warmup 스케줄러이다.
     warmup_scheduler = LinearLR(optimizer, start_factor=0.01, end_factor=1.0, total_iters=warmup_epochs)
     
-    # 2. Main Scheduler (Cosine Decay)
+    # >> 2. 이후 학습률을 코사인 형태로 감소시키는 메인 스케줄러이다.
     main_scheduler = CosineAnnealingLR(optimizer, T_max=total_epochs - warmup_epochs, eta_min=config.ETA_MIN)
 
-    # 3. Sequential (Warmup -> Main)
+    # >> 3. 두 스케줄러를 순차적으로 연결한다.
     return SequentialLR(optimizer, schedulers=[warmup_scheduler, main_scheduler], milestones=[warmup_epochs])
 
+# >> 학습 및 검증 손실과 정확도 그래프를 그리고 저장한다.
 def plot_training_results(train_losses, val_losses, train_accs, val_accs, save_dir):
     if len(train_losses) == 0:
         return
@@ -53,7 +58,7 @@ def plot_training_results(train_losses, val_losses, train_accs, val_accs, save_d
 
     plt.figure(figsize=(12, 5))
 
-    # 1. Loss Graph
+    # >> 1. 손실(Loss) 그래프를 그린다.
     plt.subplot(1, 2, 1)
     plt.plot(epochs, train_losses, 'b-', label='Train Loss')
     plt.plot(epochs, val_losses, 'r-', label='Val Loss')
@@ -63,7 +68,7 @@ def plot_training_results(train_losses, val_losses, train_accs, val_accs, save_d
     plt.legend(loc='upper right')
     plt.grid(True)
 
-    # 2. Accuracy Graph
+    # >> 2. 정확도(Accuracy) 그래프를 그린다.
     plt.subplot(1, 2, 2)
     plt.plot(epochs, train_accs, 'b-', label='Train Acc')
     plt.plot(epochs, val_accs, 'r-', label='Val Acc')
@@ -75,11 +80,12 @@ def plot_training_results(train_losses, val_losses, train_accs, val_accs, save_d
 
     plt.tight_layout()
     
-    # 그래프 저장
+    # >> 그래프를 이미지 파일로 저장한다.
     save_path = os.path.join(save_dir, 'training_result.png')
     plt.savefig(save_path)
     plt.close()
 
+# >> 한 에폭 동안 모델 학습을 수행한다.
 def train_one_epoch(model, source_loader, criterion_cls, optimizer, device, scaler, epoch, args):
     model.train()
     
@@ -89,12 +95,12 @@ def train_one_epoch(model, source_loader, criterion_cls, optimizer, device, scal
     
     desc = f"[Train Ep {epoch+1}]"
     
-    # 단일 source_loader 순회
+    # >> 배치 단위로 데이터를 순회하며 학습한다.
     pbar = tqdm(source_loader, desc=desc, leave=False, colour='green')
     
-    # DataLoader가 aux_labels도 반환하지만 사용하지 않음
     for batch in pbar:
-        features, labels, _ = batch # [수정] aux_labels 무시
+        # >> 입력 데이터와 라벨을 GPU로 이동시킨다. 보조 라벨은 사용하지 않는다.
+        features, labels, _ = batch 
         features = features.to(device)
         labels = labels.to(device)
         
@@ -102,29 +108,29 @@ def train_one_epoch(model, source_loader, criterion_cls, optimizer, device, scal
         
         optimizer.zero_grad()
         
+        # >> 혼합 정밀도(Mixed Precision)를 사용하여 순전파를 수행한다.
         with autocast('cuda'):
-            # 모델이 하나의 Logit 반환
             action_logits = model(features)
             
-            # Loss: Main Task (Action Classification) Only
+            # >> 행동 분류에 대한 교차 엔트로피 손실을 계산한다.
             loss = criterion_cls(action_logits, labels)
 
-        # Backward
+        # >> 역전파를 수행하고 가중치를 업데이트한다.
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=config.GRAD_CLIP_NORM)
         scaler.step(optimizer)
         scaler.update()
         
-        # Stats Update
+        # >> 통계 정보를 업데이트한다.
         running_loss += loss.item() * batch_size
         total_samples += batch_size
         
-        # Acc 계산
+        # >> 정확도를 계산한다.
         _, predicted = torch.max(action_logits, 1)
         correct_action += (predicted == labels).sum().item()
         
-        # Logging
+        # >> 진행률 표시줄에 현재 손실과 정확도를 표시한다.
         pbar.set_postfix({
             'Loss': f"{loss.item():.3f}",
             'Acc': f"{correct_action/total_samples:.3f}"
@@ -132,6 +138,7 @@ def train_one_epoch(model, source_loader, criterion_cls, optimizer, device, scal
         
     return running_loss / total_samples, correct_action / total_samples
 
+# >> 검증 데이터셋을 사용하여 모델 성능을 평가한다.
 def validate_one_epoch(model, loader, criterion_cls, device):
     model.eval()
     running_loss = 0.0
@@ -144,7 +151,7 @@ def validate_one_epoch(model, loader, criterion_cls, device):
             labels = labels.to(device)
             
             with autocast('cuda'):
-                # [수정] action_logits만 반환됨
+                # >> 모델 예측값(로짓)을 계산한다.
                 action_logits = model(features) 
                 loss = criterion_cls(action_logits, labels)
                 
@@ -155,7 +162,9 @@ def validate_one_epoch(model, loader, criterion_cls, device):
             
     return running_loss / total_samples, correct_action / total_samples
 
+# >> 전체 학습 파이프라인을 실행하는 메인 함수이다.
 def run_training(args):
+    # >> 시드와 하이퍼파라미터를 설정한다.
     set_seed(config.SEED)
     config.LEARNING_RATE = args.lr
     config.DROPOUT = args.dropout
@@ -166,22 +175,21 @@ def run_training(args):
     
     device = config.DEVICE
     print(f"\n[Info] Device: {device}, Protocol: {args.protocol}")
-    print(f"[Info] Mode: Standard Learning (No GRL)") # [수정] 모드 설명 변경
+    print(f"[Info] Mode: Standard Learning (No GRL)") 
     
-    # ----------------------------------------------------------------------
-    # 1. Dataset & Loader Setup
-    # ----------------------------------------------------------------------
+    
+    # > 1. Dataset & Loader Setup
     g = torch.Generator()
     g.manual_seed(config.SEED)
 
-    # Source Dataset (Train)
+    # >> 학습용 데이터셋과 로더를 초기화한다.
     source_dataset = NTURGBDDataset(config.DATASET_PATH, split='train', max_frames=config.MAX_FRAMES, protocol=args.protocol)
     source_loader = torch.utils.data.DataLoader(
         source_dataset, batch_size=config.BATCH_SIZE, 
         shuffle=True, num_workers=config.NUM_WORKERS, pin_memory=config.PIN_MEMORY, generator=g, drop_last=True
     )
     
-    # Validation Dataset
+    # >> 검증용 데이터셋과 로더를 초기화한다.
     val_dataset = NTURGBDDataset(config.DATASET_PATH, split='val', max_frames=config.MAX_FRAMES, protocol=args.protocol)
     val_loader = torch.utils.data.DataLoader(
         val_dataset, batch_size=config.BATCH_SIZE, 
@@ -190,20 +198,19 @@ def run_training(args):
     
     print(f"Training Samples: {len(source_dataset)}, Validation Samples: {len(val_dataset)}")
 
-    # [수정] GRL 관련 num_aux_classes 로직 제거
-
     # 2. Model Init
-    model = ST_Model( # [수정] 클래스명 변경
+    # >> 모델을 생성하고 설정된 디바이스로 이동시킨다.
+    model = ST_Model(
         num_joints=config.NUM_JOINTS,
         num_coords=config.NUM_COORDS,
         num_classes=config.NUM_CLASSES,
         hidden_dim=config.HIDDEN_DIM,
         window_size=config.WINDOW_SIZE,
         dropout=config.DROPOUT,
-        # num_aux_classes 제거
     ).to(device)
     
     # 3. Optim & Loss
+    # >> AdamW 옵티마이저와 스케줄러, 손실 함수를 정의한다.
     optimizer = optim.AdamW(model.parameters(), lr=config.LEARNING_RATE, weight_decay=config.ADAMW_WEIGHT_DECAY)
     
     scheduler = get_scheduler(optimizer, config.EPOCHS, config.WARMUP_EPOCHS)
@@ -211,7 +218,6 @@ def run_training(args):
     scaler = GradScaler('cuda')
     
     criterion_cls = nn.CrossEntropyLoss(label_smoothing=config.LABEL_SMOOTHING)
-    # [수정] criterion_aux 제거
     
     # 4. Training Loop Prep
     best_acc = 0.0
@@ -223,6 +229,7 @@ def run_training(args):
     train_accs, val_accs = [], []
     
     # --- Resume Logic ---
+    # >> 체크포인트가 존재하면 학습 상태를 복원한다.
     ckpt_path = None
     last_ckpt_path = os.path.join(trial_save_dir, "last_model.pth.tar")
     best_ckpt_path = os.path.join(trial_save_dir, "best_model.pth.tar")
@@ -259,8 +266,8 @@ def run_training(args):
     print(f"Start Training: {config.EPOCHS} Epochs")
     
     try:
+        # >> 지정된 에폭 수만큼 반복하여 학습을 수행한다.
         for epoch in range(start_epoch, config.EPOCHS):
-            # [수정] criterion_aux 인자 제거
             train_loss, train_acc = train_one_epoch(
                 model, source_loader, criterion_cls, 
                 optimizer, device, scaler, epoch, args
@@ -268,6 +275,7 @@ def run_training(args):
             
             val_loss, val_acc = validate_one_epoch(model, val_loader, criterion_cls, device)
             
+            # >> 스케줄러를 업데이트하고 현재 학습률을 기록한다.
             scheduler.step()
             current_lr = optimizer.param_groups[0]['lr']
             
@@ -292,11 +300,13 @@ def run_training(args):
                 'val_accs': val_accs
             }
 
+            # >> 검증 정확도가 갱신되면 베스트 모델로 저장한다.
             if val_acc > best_acc:
                 best_acc = val_acc
                 save_dict['best_acc'] = best_acc 
                 save_checkpoint(save_dict, directory=trial_save_dir, filename="best_model.pth.tar")
                 
+            # >> 현재 에폭의 모델을 마지막 모델로 저장한다.
             save_checkpoint(save_dict, directory=trial_save_dir, filename="last_model.pth.tar")
                 
     except KeyboardInterrupt:
@@ -311,6 +321,7 @@ def run_training(args):
     return best_acc
 
 def main():
+    # >> 커맨드 라인 인자를 파싱하고 학습 함수를 호출한다.
     parser = argparse.ArgumentParser()
     parser.add_argument('--protocol', type=str, default='xsub', choices=['xsub', 'xview'])
     parser.add_argument('--study-name', type=str, default='default_study')
@@ -327,8 +338,6 @@ def main():
     parser.add_argument('--weight-decay', type=float, default=config.ADAMW_WEIGHT_DECAY)
     parser.add_argument('--smoothing', type=float, default=config.LABEL_SMOOTHING)
     
-    # [수정] GRL alpha argument 제거
-
     args = parser.parse_args()
     
     run_training(args)
