@@ -25,11 +25,11 @@ import traceback
 
 
 SOURCE_DATA_PATH = '../../paper-review/Action_Recognition/Code/nturgbd01/' 
-TARGET_DATA_PATH = '../nturgbd_processed_12D_Norm_SKF/' 
+TARGET_DATA_PATH = '../nturgbd_processed_12D_Norm/' 
 
 # 통계 파일 경로 분리
-STATS_FILE_XSUB = '../stats_xsub_SKF.npz'
-STATS_FILE_XVIEW = '../stats_xview_SKF.npz'
+STATS_FILE_XSUB = '../stats_xsub.npz'
+STATS_FILE_XVIEW = '../stats_xview.npz'
 
 MAX_FRAMES = config.MAX_FRAMES 
 NUM_JOINTS = config.NUM_JOINTS

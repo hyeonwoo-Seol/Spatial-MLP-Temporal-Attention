@@ -6,10 +6,10 @@ python preprocess_ntu_data.py
 
 ## 1번 실행하기
 
-python train.py --protocol xview --study-name GRL_XView --trial-number 1
+python train.py --protocol xview --study-name XView1 --trial-number 1
 
 
-python train.py --protocol xsub --study-name GRL_XSub --trial-number 1 --auto-resume
+python train.py --protocol xsub --study-name XSub1 --trial-number 1 --auto-resume
 
 
 ## Optuna로 실행하기
@@ -25,3 +25,7 @@ python train.py --protocol xview | tee log.txt
 ## optuna
 
 ptuna-dashboard sqlite:///optuna_study.db
+
+## 검증
+
+python evaluate.py --checkpoint checkpoints/XView1/trial_1/best_model.pth.tar --protocol xview

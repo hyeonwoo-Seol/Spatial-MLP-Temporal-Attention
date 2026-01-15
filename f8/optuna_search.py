@@ -15,7 +15,7 @@ class TrainArgs:
         # >> 1. 탐색할 하이퍼파라미터 범위를 설정한다 (Trial 객체 사용).
         self.lr = trial.suggest_float("lr", 4e-4, 9e-4, log=False)
         self.dropout = trial.suggest_float("dropout", 0.1, 0.4)
-        self.prob = trial.suggest_float("prob", 0.3, 0.8) 
+        self.prob = trial.suggest_float("prob", 0.3, 0.7) 
         self.weight_decay = trial.suggest_float("weight_decay", 1e-4, 1e-3, log=False)
         self.smoothing = trial.suggest_float("smoothing", 0.0, 0.2)
         

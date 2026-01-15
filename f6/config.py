@@ -1,8 +1,8 @@
-# config.py
+# >> config.py
 
 import torch
 
-DATASET_PATH = '../nturgbd_processed_12D_Norm_SKF/'
+DATASET_PATH = '../nturgbd_processed_12D_Norm/'
 
 
 SAVE_DIR = 'checkpoints/'

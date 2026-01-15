@@ -1,3 +1,5 @@
+# >> train.py
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -80,6 +82,45 @@ def plot_training_results(train_losses, val_losses, train_accs, val_accs, save_d
     plt.savefig(save_path)
     plt.close()
 
+# [추가] Confusion Matrix 및 Class Accuracy 시각화 함수
+def plot_confusion_matrix(labels, preds, num_classes, save_dir, epoch):
+    # Confusion Matrix 계산 (sklearn 없이 구현)
+    cm = np.zeros((num_classes, num_classes), dtype=int)
+    for l, p in zip(labels, preds):
+        cm[l, p] += 1
+    
+    # Class Accuracy 계산
+    # 각 행의 합(해당 클래스의 전체 샘플 수)으로 대각 성분(정답 수)을 나눔
+    with np.errstate(divide='ignore', invalid='ignore'):
+        class_acc = cm.diagonal() / cm.sum(axis=1)
+        class_acc = np.nan_to_num(class_acc) # 0으로 나누는 경우 처리
+
+    # Class Accuracy 텍스트 파일 저장
+    acc_save_path = os.path.join(save_dir, f'class_accuracy_epoch_{epoch}.txt')
+    with open(acc_save_path, 'w') as f:
+        f.write(f"Epoch {epoch} Class-wise Accuracy:\n")
+        for i, acc in enumerate(class_acc):
+            f.write(f"Class {i+1}: {acc:.4f}\n")
+
+    # Confusion Matrix 이미지 저장
+    plt.figure(figsize=(20, 20)) # 클래스가 많으므로(60개) 크기를 키움
+    plt.imshow(cm, interpolation='nearest', cmap=plt.cm.Blues)
+    plt.title(f'Confusion Matrix (Epoch {epoch})')
+    plt.colorbar()
+    
+    # 축 설정
+    tick_marks = np.arange(num_classes)
+    plt.xticks(tick_marks, tick_marks + 1, rotation=90, fontsize=8) # 클래스 인덱스 1부터 시작
+    plt.yticks(tick_marks, tick_marks + 1, fontsize=8)
+    
+    plt.xlabel('Predicted Label')
+    plt.ylabel('True Label')
+    plt.tight_layout()
+    
+    cm_save_path = os.path.join(save_dir, f'confusion_matrix_epoch_{epoch}.png')
+    plt.savefig(cm_save_path)
+    plt.close()
+
 def train_one_epoch(model, source_loader, criterion_cls, optimizer, device, scaler, epoch, args):
     model.train()
     
@@ -138,6 +179,10 @@ def validate_one_epoch(model, loader, criterion_cls, device):
     correct_action = 0
     total_samples = 0
     
+    # [추가] Confusion Matrix를 위한 예측값 및 실제값 수집 리스트
+    all_preds = []
+    all_labels = []
+    
     with torch.no_grad():
         for features, labels, _ in tqdm(loader, desc="[Val]", leave=False, colour='cyan'):
             features = features.to(device)
@@ -153,7 +198,12 @@ def validate_one_epoch(model, loader, criterion_cls, device):
             correct_action += (predicted == labels).sum().item()
             total_samples += features.size(0)
             
-    return running_loss / total_samples, correct_action / total_samples
+            # [추가] 예측 결과 수집
+            all_preds.extend(predicted.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+            
+    # [수정] 전체 정확도 외에 개별 예측/레이블 리스트 반환
+    return running_loss / total_samples, correct_action / total_samples, all_preds, all_labels
 
 def run_training(args):
     set_seed(config.SEED)
@@ -266,7 +316,8 @@ def run_training(args):
                 optimizer, device, scaler, epoch, args
             )
             
-            val_loss, val_acc = validate_one_epoch(model, val_loader, criterion_cls, device)
+            # [수정] 반환값 변경 (val_preds, val_labels 추가)
+            val_loss, val_acc, val_preds, val_labels = validate_one_epoch(model, val_loader, criterion_cls, device)
             
             scheduler.step()
             current_lr = optimizer.param_groups[0]['lr']
@@ -279,6 +330,9 @@ def run_training(args):
             print(f"Ep [{epoch+1}/{config.EPOCHS}] LR: {current_lr:.6f} | Train Acc: {train_acc:.4f} | Val Acc: {val_acc:.4f}")
             
             plot_training_results(train_losses, val_losses, train_accs, val_accs, trial_save_dir)
+            
+            # [추가] Confusion Matrix 및 Class Accuracy 저장
+            plot_confusion_matrix(val_labels, val_preds, config.NUM_CLASSES, trial_save_dir, epoch + 1)
             
             save_dict = {
                 'epoch': epoch + 1,

@@ -1,3 +1,5 @@
+# >> ntu_data_loader.py
+
 import os
 import numpy as np
 import torch
@@ -24,11 +26,11 @@ class NTURGBDDataset(Dataset):
         base_dir = os.path.dirname(data_path.rstrip('/'))
         
         if self.protocol == 'xsub':
-            stats_filename = 'stats_xsub_SKF.npz'
+            stats_filename = 'stats_xsub.npz'
         elif self.protocol == 'xview':
-            stats_filename = 'stats_xview_SKF.npz'
+            stats_filename = 'stats_xview.npz'
         else:
-            stats_filename = 'stats_xsub_SKF.npz' 
+            stats_filename = 'stats_xsub.npz' 
             
         stats_path = os.path.join(base_dir, stats_filename)
         
