@@ -119,7 +119,8 @@ class NTURGBDDataset(Dataset):
         # >> 전처리된 데이터는 이미 (config.MAX_FRAMES, Joint, C) 형태이다.
         features = data['data'] # 딕셔너리에서 data 키에 해당하는 특징 텐서를 꺼내기 
         action_label = data['label'] # 딕셔너리에서 label에 해당하는 행동 라벨 꺼내기 
-        
+
+        # >> 1을 빼서 0부터 시작하는 보조 라벨을 만든다 
         if self.protocol == 'xsub':
             sid = int(filename[9:12])
             aux_label = sid - 1 
