@@ -80,7 +80,7 @@ class NTURGBDDataset(Dataset):
     def __len__(self):
         return len(self.samples)
 
-    # >> 데이터를 증강한다 
+    # >> 데이터를 증강한다
     def _get_augmented_view(self, features):
         feat = features.clone() # 원본 데이터를 보존하기 위해 deep copy를 한다 
         T = feat.shape[0] # 텐서의 첫 번째 차원인 프레임 수 정보를 T에 저장한다 
