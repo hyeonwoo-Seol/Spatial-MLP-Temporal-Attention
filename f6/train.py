@@ -13,7 +13,6 @@ import sys
 import argparse
 import time
 
-# [수정] Matplotlib Backend 설정 (Pyplot 임포트 전에 설정 필수)
 import matplotlib
 matplotlib.use('Agg') 
 import matplotlib.pyplot as plt
@@ -22,7 +21,7 @@ import config
 
 # 모듈 import
 from ntu_data_loader import NTURGBDDataset
-from model import ST_Model  # [수정] 변경된 모델 클래스 import
+from model import ST_Model
 from utils import calculate_accuracy, save_checkpoint, load_checkpoint
 
 def set_seed(seed):
@@ -82,9 +81,9 @@ def plot_training_results(train_losses, val_losses, train_accs, val_accs, save_d
     plt.savefig(save_path)
     plt.close()
 
-# [추가] Confusion Matrix 및 Class Accuracy 시각화 함수
+# Confusion Matrix 및 Class Accuracy 시각화 함수
 def plot_confusion_matrix(labels, preds, num_classes, save_dir, epoch):
-    # Confusion Matrix 계산 (sklearn 없이 구현)
+    # Confusion Matrix 계산
     cm = np.zeros((num_classes, num_classes), dtype=int)
     for l, p in zip(labels, preds):
         cm[l, p] += 1
@@ -135,7 +134,7 @@ def train_one_epoch(model, source_loader, criterion_cls, optimizer, device, scal
     
     # DataLoader가 aux_labels도 반환하지만 사용하지 않음
     for batch in pbar:
-        features, labels, _ = batch # [수정] aux_labels 무시
+        features, labels, _ = batch
         features = features.to(device)
         labels = labels.to(device)
         
@@ -179,7 +178,7 @@ def validate_one_epoch(model, loader, criterion_cls, device):
     correct_action = 0
     total_samples = 0
     
-    # [추가] Confusion Matrix를 위한 예측값 및 실제값 수집 리스트
+    # Confusion Matrix를 위한 예측값 및 실제값 수집 리스트
     all_preds = []
     all_labels = []
     
@@ -189,7 +188,7 @@ def validate_one_epoch(model, loader, criterion_cls, device):
             labels = labels.to(device)
             
             with autocast('cuda'):
-                # [수정] action_logits만 반환됨
+                # action_logits만 반환됨
                 action_logits = model(features) 
                 loss = criterion_cls(action_logits, labels)
                 
@@ -198,11 +197,11 @@ def validate_one_epoch(model, loader, criterion_cls, device):
             correct_action += (predicted == labels).sum().item()
             total_samples += features.size(0)
             
-            # [추가] 예측 결과 수집
+            # 예측 결과 수집
             all_preds.extend(predicted.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
             
-    # [수정] 전체 정확도 외에 개별 예측/레이블 리스트 반환
+    # 전체 정확도 외에 개별 예측/레이블 리스트 반환
     return running_loss / total_samples, correct_action / total_samples, all_preds, all_labels
 
 def run_training(args):
@@ -240,10 +239,8 @@ def run_training(args):
     
     print(f"Training Samples: {len(source_dataset)}, Validation Samples: {len(val_dataset)}")
 
-    # [수정] GRL 관련 num_aux_classes 로직 제거
-
     # 2. Model Init
-    model = ST_Model( # [수정] 클래스명 변경
+    model = ST_Model(
         num_joints=config.NUM_JOINTS,
         num_coords=config.NUM_COORDS,
         num_classes=config.NUM_CLASSES,
@@ -261,7 +258,6 @@ def run_training(args):
     scaler = GradScaler('cuda')
     
     criterion_cls = nn.CrossEntropyLoss(label_smoothing=config.LABEL_SMOOTHING)
-    # [수정] criterion_aux 제거
     
     # 4. Training Loop Prep
     best_acc = 0.0
@@ -310,13 +306,11 @@ def run_training(args):
     
     try:
         for epoch in range(start_epoch, config.EPOCHS):
-            # [수정] criterion_aux 인자 제거
             train_loss, train_acc = train_one_epoch(
                 model, source_loader, criterion_cls, 
                 optimizer, device, scaler, epoch, args
             )
             
-            # [수정] 반환값 변경 (val_preds, val_labels 추가)
             val_loss, val_acc, val_preds, val_labels = validate_one_epoch(model, val_loader, criterion_cls, device)
             
             scheduler.step()
@@ -331,7 +325,6 @@ def run_training(args):
             
             plot_training_results(train_losses, val_losses, train_accs, val_accs, trial_save_dir)
             
-            # [추가] Confusion Matrix 및 Class Accuracy 저장
             plot_confusion_matrix(val_labels, val_preds, config.NUM_CLASSES, trial_save_dir, epoch + 1)
             
             save_dict = {
@@ -380,8 +373,6 @@ def main():
     parser.add_argument('--prob', type=float, default=config.PROB)
     parser.add_argument('--weight-decay', type=float, default=config.ADAMW_WEIGHT_DECAY)
     parser.add_argument('--smoothing', type=float, default=config.LABEL_SMOOTHING)
-    
-    # [수정] GRL alpha argument 제거
 
     args = parser.parse_args()
     

@@ -44,7 +44,7 @@ SKELETON_BONES = [
     (0, 16), (16, 17), (17, 18), (18, 19)
 ]
 
-def _read_skeleton_file(filepath):
+def read_skeleton_file(filepath):
     """기존과 동일한 스켈레톤 파일 읽기 함수"""
     try:
         with open(filepath, 'r') as f:
@@ -121,7 +121,7 @@ def _read_skeleton_file(filepath):
         
     return final_coords
 
-def resize_data_skateformer_style(data_numpy, target_frames=MAX_FRAMES):
+def resize_data(data_numpy, target_frames=MAX_FRAMES):
     """
     [SkateFormer Strategy Implementation]
     1. 전체 데이터에서 움직임이 있는(0이 아닌) 유효 구간(Valid Interval)을 찾습니다.
@@ -163,7 +163,7 @@ def resize_data_skateformer_style(data_numpy, target_frames=MAX_FRAMES):
     
     return data_resized.numpy()
 
-def _calculate_features(coords):
+def calculate_features(coords):
     """12차원 벡터 특징 계산 함수"""
     T = coords.shape[0]
     if T == 0: # 데이터가 비어 있는 경우,
@@ -240,12 +240,12 @@ def process_file_for_stats(filename):
         if not is_xsub_train and not is_xview_train: return None # sid, cid 모두 충족하지 않으면 none 반환 
         
         path = os.path.join(SOURCE_DATA_PATH, filename)
-        coords = _read_skeleton_file(path)
+        coords = read_skeleton_file(path)
         if coords.shape[0] == 0: return None
         
         # >> 전체 좌표를 넘겨서 Resize 수행 (config.MAX_FRAMES)
-        resized_coords = resize_data_skateformer_style(coords, target_frames=MAX_FRAMES) # MAX_FRAMES 길이로 보간된 데이터를 기준으로 통계를 계산 
-        features = _calculate_features(resized_coords) # 12차원 특징 추출 
+        resized_coords = resize_data(coords, target_frames=MAX_FRAMES) # MAX_FRAMES 길이로 보간된 데이터를 기준으로 통계를 계산 
+        features = calculate_features(resized_coords) # 12차원 특징 추출 
         
         features_flat = features.reshape(-1, config.NUM_COORDS) # 데이터를 (T * J, C) 형태로 평탄화 
         mask = np.abs(features_flat).sum(axis=1) > 1e-6 # 특징 값의 합이 1e-6보다 작으면 계산에서 제외
@@ -300,17 +300,17 @@ def process_and_save_file(filename):
     
     try: # 파일 처리 중간에 에러가 발생해도 멈추지 않도록 try 안에 작성
         path = os.path.join(SOURCE_DATA_PATH, filename) # Source_data_path와 filename을 합쳐서 절대경로를 만든다
-        coords = _read_skeleton_file(path) # 함수 호출을 해서 3D 관절 좌표 데이터를 읽어온다 
+        coords = read_skeleton_file(path) # 함수 호출을 해서 3D 관절 좌표 데이터를 읽어온다 
         label = int(filename[17:20]) - 1 # 정답 레이블을 추출한다 
 
         if coords.shape[0] == 0: # 프레임 수가 0이라서 파일이 손상된 경우 모든 값이 0인 더미 데이터를 생성. 에러는 발생하지 않음 
             feat = np.zeros((MAX_FRAMES, NUM_JOINTS, config.NUM_COORDS))
         else:
             # >> config.MAX_FRAMES에 맞춰 전체 시퀀스 Resize
-            resized_coords = resize_data_skateformer_style(coords, target_frames=MAX_FRAMES)
+            resized_coords = resize_data(coords, target_frames=MAX_FRAMES)
             
             # >> Resize된 좌표로 특징 계산
-            feat = _calculate_features(resized_coords) 
+            feat = calculate_features(resized_coords) 
 
         # >> 처리된 데이터를 최종적으로 저장 
         torch.save({ # 딕셔너리를 직렬화해서 저장 
