@@ -75,6 +75,7 @@ class SpatialMixerBlock(nn.Module):
         
         # Token Mixing MLP: 관절(V) 간의 정보 교환하는 MLP다.
         self.norm1 = RMSNorm(dim)
+        
         self.token_mixing_mlp = nn.Sequential(
             nn.Linear(num_joints, num_joints),
             nn.GELU(),
@@ -85,10 +86,10 @@ class SpatialMixerBlock(nn.Module):
         # Channel Mixing MLP: 채널(D) 간의 정보 교환하는 MLP다.
         self.norm2 = RMSNorm(dim)
         self.channel_mixing_mlp = nn.Sequential(
-            nn.Linear(dim, dim * 2),
+            nn.Linear(dim, dim),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(dim * 2, dim),
+            nn.Linear(dim, dim),
             nn.Dropout(dropout)
         )
 
