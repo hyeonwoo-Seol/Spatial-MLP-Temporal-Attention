@@ -200,11 +200,11 @@ class SwinTemporalBlock(nn.Module):
         self.norm1 = RMSNorm(self.dim_inner)
         
         # [Multi-Scale] 두 개의 서로 다른 Window Attention 생성
-        # Branch 1: window_sizes[0] (예: 10)
+        # Branch 1: window_sizes[0] -> 10
         self.attn1 = WindowAttention(
             self.dim_branch, window_sizes[0], self.heads_branch, dropout
         )
-        # Branch 2: window_sizes[1] (예: 20)
+        # Branch 2: window_sizes[1] -> 20
         self.attn2 = WindowAttention(
             self.dim_branch, window_sizes[1], self.heads_branch, dropout
         )
@@ -330,7 +330,7 @@ class ST_Model(nn.Module):
                  num_coords=config.NUM_COORDS, 
                  num_classes=config.NUM_CLASSES, 
                  hidden_dim=128,
-                 window_size=config.WINDOW_SIZE, # 기본 10
+                 window_size=config.WINDOW_SIZE,
                  dropout=config.DROPOUT,
                  **kwargs):
         
